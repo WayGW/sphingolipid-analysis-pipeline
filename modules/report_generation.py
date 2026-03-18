@@ -1075,6 +1075,16 @@ class ExcelReportGenerator:
                 ]
                 for _, row in sig_pairs.iterrows():
                     sig_comparisons.append(f"{row['group1']} vs {row['group2']}")
+            elif (result.main_test.significant
+                  and len(result.main_test.groups_compared) == 2
+                  and result.main_test.effect_size is not None):
+                g1, g2 = result.main_test.groups_compared
+                if result.main_test.effect_size > 0:
+                    sig_comparisons.append(f"{g1} > {g2}")
+                elif result.main_test.effect_size < 0:
+                    sig_comparisons.append(f"{g1} < {g2}")
+                else:
+                    sig_comparisons.append(f"{g1} vs {g2}")
 
             summary_rows.append({
                 'Analyte': sl_name,
@@ -1199,7 +1209,17 @@ class ExcelReportGenerator:
                     ]
                     for _, row in sig_pairs.iterrows():
                         sig_comparisons.append(f"{row['group1']} vs {row['group2']}")
-                
+                elif (result.main_test.significant
+                      and len(result.main_test.groups_compared) == 2
+                      and result.main_test.effect_size is not None):
+                    g1, g2 = result.main_test.groups_compared
+                    if result.main_test.effect_size > 0:
+                        sig_comparisons.append(f"{g1} > {g2}")
+                    elif result.main_test.effect_size < 0:
+                        sig_comparisons.append(f"{g1} < {g2}")
+                    else:
+                        sig_comparisons.append(f"{g1} vs {g2}")
+
                 results_rows.append({
                     'Analysis': sheet_name,
                     'Test': result.main_test.test_type.value,

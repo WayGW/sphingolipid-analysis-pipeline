@@ -520,7 +520,7 @@ def generate_all_export_figures(processed, results, settings):
                     fig = viz.plot_multi_panel_groups_with_stats(
                         data, selected, group_col, stats_dict, ncols=3,
                         plot_type=settings['plot_type'], log_scale=log_scale,
-                        show_points=settings['show_points'])
+                        show_points=settings['show_points'], ylabel='Concentration (ng/mL)')
                     figures[f'concentrations{suffix}'] = fig
                 except Exception as _e:
                     print(f'Export figure error: {_e}')
@@ -540,7 +540,7 @@ def generate_all_export_figures(processed, results, settings):
                     fig = viz.plot_multi_panel_groups_with_stats(
                         totals_combined, available_totals, group_col, totals_stats, ncols=3,
                         plot_type=settings['plot_type'], log_scale=log_scale,
-                        show_points=settings['show_points'])
+                        show_points=settings['show_points'], ylabel='Concentration (ng/mL)')
                     figures[f'totals{suffix}'] = fig
                 except Exception as _e:
                     print(f'Export figure error: {_e}')
@@ -563,7 +563,7 @@ def generate_all_export_figures(processed, results, settings):
                 fig = viz.plot_multi_panel_groups_with_stats(
                     pct_display, display_cols, group_col, pct_stats, ncols=3,
                     plot_type=settings['plot_type'], log_scale=False,
-                    show_points=settings['show_points'])
+                    show_points=settings['show_points'], ylabel='% of Total')
                 figures['percentages_top10'] = fig
             except Exception as _e:
                 print(f'Export figure error: {_e}')
@@ -580,7 +580,7 @@ def generate_all_export_figures(processed, results, settings):
                     fig = viz.plot_multi_panel_groups_with_stats(
                         ratios_combined, ratio_cols[:9], group_col, ratios_stats, ncols=3,
                         plot_type=settings['plot_type'], log_scale=log_scale,
-                        show_points=settings['show_points'])
+                        show_points=settings['show_points'], ylabel='Ratio')
                     figures[f'ratios{suffix}'] = fig
                 except Exception as _e:
                     print(f'Export figure error: {_e}')

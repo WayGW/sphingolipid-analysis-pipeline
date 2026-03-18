@@ -557,8 +557,7 @@ class SphingolipidVisualizer:
             # Prepare plot data - apply log10 transform if requested
             plot_data = data.copy()
             plot_col = col
-            ylabel = col
-            
+
             if log_scale:
                 # Create log10 transformed column, handling zeros
                 log_col = f'{col}_log10'
@@ -567,7 +566,6 @@ class SphingolipidVisualizer:
                 floor_val = min_positive / 10 if pd.notna(min_positive) else 0.001
                 plot_data[log_col] = np.log10(plot_data[col].clip(lower=floor_val))
                 plot_col = log_col
-                ylabel = f'log₁₀({col})'
             
             if plot_type == "box":
                 sns.boxplot(data=plot_data, x=group_col, y=plot_col, ax=ax,
@@ -632,6 +630,7 @@ class SphingolipidVisualizer:
                 ax.set_ylabel(f'log₁₀({ylabel})')
             else:
                 ax.set_ylabel(ylabel)
+
             ax.tick_params(axis='x', rotation=45)
         
         for i in range(n_plots, len(axes)):

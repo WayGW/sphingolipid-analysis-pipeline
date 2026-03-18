@@ -788,11 +788,14 @@ class ExcelReportGenerator:
                     self._write_sheet(writer, sheet)
             else:
                 # ============================================================
-                # ONE-WAY REPORT (unchanged)
+                # ONE-WAY REPORT
                 # ============================================================
                 self._write_overview_sheet(writer)
                 for sheet_name, sheet in self.analysis_sheets.items():
                     self._write_sheet(writer, sheet)
+                # Individual sphingolipid concentrations tab
+                if self.results.individual_sl_results:
+                    self._write_concentrations_sheet(writer)
         
         return filepath
     
@@ -1046,6 +1049,112 @@ class ExcelReportGenerator:
                     pass
             ws.column_dimensions[column_letter].width = min(max_length + 2, 50)
     
+    def _write_concentrations_sheet(self, writer: pd.ExcelWriter):
+        """Write individual sphingolipid concentration comparisons sheet."""
+        sheet_name = 'Concentrations'
+        current_row = 0
+
+        # Title
+        title_df = pd.DataFrame({'': ['INDIVIDUAL SPHINGOLIPID CONCENTRATION COMPARISONS']})
+        title_df.to_excel(writer, sheet_name=sheet_name, startrow=current_row,
+                         index=False, header=False)
+        current_row += 2
+
+        # Summary table of all analytes
+        section_header = pd.DataFrame({'': ['RESULTS SUMMARY']})
+        section_header.to_excel(writer, sheet_name=sheet_name, startrow=current_row,
+                               index=False, header=False)
+        current_row += 1
+
+        summary_rows = []
+        for sl_name, result in self.results.individual_sl_results.items():
+            sig_comparisons = []
+            if result.posthoc_test and result.posthoc_test.pairwise_results is not None:
+                sig_pairs = result.posthoc_test.pairwise_results[
+                    result.posthoc_test.pairwise_results['significant'] == True
+                ]
+                for _, row in sig_pairs.iterrows():
+                    sig_comparisons.append(f"{row['group1']} vs {row['group2']}")
+
+            summary_rows.append({
+                'Analyte': sl_name,
+                'Test': result.main_test.test_type.value,
+                'P-value': f"{result.main_test.pvalue:.6f}",
+                'Significant': 'Yes' if result.main_test.significant else 'No',
+                'Effect Size': f"{result.main_test.effect_size:.3f}" if result.main_test.effect_size else 'N/A',
+                'Significant Comparisons': '; '.join(sig_comparisons) if sig_comparisons else 'None'
+            })
+
+        if summary_rows:
+            summary_df = pd.DataFrame(summary_rows)
+            summary_df.to_excel(writer, sheet_name=sheet_name, startrow=current_row, index=False)
+            current_row += len(summary_df) + 3
+
+        # Detailed results per analyte
+        section_header = pd.DataFrame({'': ['DETAILED RESULTS']})
+        section_header.to_excel(writer, sheet_name=sheet_name, startrow=current_row,
+                               index=False, header=False)
+        current_row += 2
+
+        for sl_name, result in self.results.individual_sl_results.items():
+            # Analyte header
+            var_header = pd.DataFrame({'': [f'--- {sl_name} ---']})
+            var_header.to_excel(writer, sheet_name=sheet_name, startrow=current_row,
+                               index=False, header=False)
+            current_row += 1
+
+            # Test info
+            test_label = pd.DataFrame({'': [f'Test: {result.main_test.test_type.value}']})
+            test_label.to_excel(writer, sheet_name=sheet_name, startrow=current_row,
+                               index=False, header=False)
+            current_row += 1
+
+            # Descriptive statistics
+            if result.descriptive_stats is not None and not result.descriptive_stats.empty:
+                desc_header = pd.DataFrame({'': ['Descriptive Statistics']})
+                desc_header.to_excel(writer, sheet_name=sheet_name, startrow=current_row,
+                                    index=False, header=False)
+                current_row += 1
+                result.descriptive_stats.to_excel(writer, sheet_name=sheet_name,
+                                                  startrow=current_row, index=False)
+                current_row += len(result.descriptive_stats) + 1
+
+            # Main test result
+            main_row = {
+                'Statistic': f"{result.main_test.statistic:.4f}",
+                'P-value': f"{result.main_test.pvalue:.6f}",
+                'Significant': 'Yes' if result.main_test.significant else 'No',
+                'Effect Size': f"{result.main_test.effect_size:.3f}" if result.main_test.effect_size else 'N/A',
+            }
+            main_df = pd.DataFrame([main_row])
+            main_df.to_excel(writer, sheet_name=sheet_name, startrow=current_row, index=False)
+            current_row += 3
+
+            # Post-hoc results
+            if result.posthoc_test and result.posthoc_test.pairwise_results is not None:
+                ph_header = pd.DataFrame({'': [f'Post-hoc: {result.posthoc_test.test_type.value}']})
+                ph_header.to_excel(writer, sheet_name=sheet_name, startrow=current_row,
+                                  index=False, header=False)
+                current_row += 1
+                result.posthoc_test.pairwise_results.to_excel(
+                    writer, sheet_name=sheet_name, startrow=current_row, index=False)
+                current_row += len(result.posthoc_test.pairwise_results) + 1
+
+            current_row += 1  # Spacing between analytes
+
+        # Auto-adjust column widths
+        ws = writer.sheets[sheet_name]
+        for column in ws.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            ws.column_dimensions[column_letter].width = min(max_length + 2, 50)
+
     def _write_overview_sheet(self, writer: pd.ExcelWriter):
         """Write overview/summary sheet."""
         

@@ -1385,7 +1385,18 @@ class SignificancePlotter:
             if show_points:
                 sns.stripplot(data=data, x=group_col, y=value_col, ax=ax,
                             color='black', alpha=0.5, size=5, order=group_order)
-        
+        elif plot_type == "strip":
+            sns.stripplot(data=data, x=group_col, y=value_col, ax=ax,
+                         hue=group_col, palette=colors, order=group_order,
+                         size=6, alpha=0.7, legend=False)
+            # Add mean ± SEM lines
+            means = data.groupby(group_col)[value_col].mean()
+            sems = data.groupby(group_col)[value_col].sem()
+            for i, g in enumerate(group_order):
+                if g in means.index:
+                    ax.hlines(means[g], i - 0.25, i + 0.25, color='black', linewidth=1.5, zorder=5)
+                    ax.errorbar(i, means[g], yerr=sems[g], color='black',
+                               capsize=5, capthick=1.5, linewidth=1.5, fmt='none', zorder=5)
         # Add significance brackets
         self.add_significance_brackets(
             ax, significant_pairs, group_order,
@@ -1455,6 +1466,19 @@ class SignificancePlotter:
                               inner='box', legend=False)
                 sns.stripplot(data=plot_data, x=group_col, y='Total', ax=ax,
                             color='black', alpha=0.5, size=4, order=group_order)
+            elif plot_type == "strip":
+                sns.stripplot(data=plot_data, x=group_col, y='Total', ax=ax,
+                             hue=group_col, palette=colors, order=group_order,
+                             size=5, alpha=0.7, legend=False)
+                # Add mean ± SEM lines
+                means = plot_data.groupby(group_col)['Total'].mean()
+                sems = plot_data.groupby(group_col)['Total'].sem()
+                for j, g in enumerate(group_order):
+                    if g in means.index:
+                        ax.hlines(means[g], j - 0.25, j + 0.25, color='black', linewidth=1.5, zorder=5)
+                        ax.errorbar(j, means[g], yerr=sems[g], color='black',
+                                   capsize=4, capthick=1.5, linewidth=1.5, fmt='none', zorder=5)
+            
             elif plot_type == "bar":
                 means = plot_data.groupby(group_col)['Total'].mean()
                 sems = plot_data.groupby(group_col)['Total'].sem()

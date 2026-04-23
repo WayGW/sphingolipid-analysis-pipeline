@@ -216,7 +216,9 @@ def get_data_affecting_settings(settings):
     return {
         'lod_handling': settings['lod_handling'],
         'lod_value': settings['lod_value'],
-        'alpha': settings['alpha']
+        'alpha': settings['alpha'],
+        'dilution_factor': settings.get('dilution_factor', 1.0),
+        'units': settings.get('units', 'ng/mL'),
     }
 
 
@@ -306,6 +308,7 @@ def compute_all_statistics(processed, settings):
         alpha=settings['alpha'],
         factors=factors,
         n_factors=n_factors,
+        units=settings.get('units', 'ng/mL'),
     )
     
     results = report_gen.run_all_statistics()
@@ -344,8 +347,117 @@ def generate_all_export_figures(processed, results, settings):
     available_sls = processed.structure.sphingolipid_cols
     
     is_twoway = results.is_twoway
-    
-    if is_twoway:
+    is_threeway = getattr(results, 'is_threeway', False)
+
+    if is_threeway:
+        # =====================================================================
+        # THREE-WAY ANOVA EXPORT FIGURES
+        # =====================================================================
+        fa_col = results.factor_a_col
+        fb_col = results.factor_b_col
+        fc_col = results.factor_c_col
+        fa_name = results.factor_a_name
+        fb_name = results.factor_b_name
+        fc_name = results.factor_c_name
+
+        conc_selections = {
+            'top10': get_top_analytes(processed, 10),
+            'significant': [s for s in available_sls if s in results.threeway_individual_sl
+                           and any(getattr(results.threeway_individual_sl[s].threeway_result, attr) < settings['alpha']
+                                   for attr in ['factor_a_pvalue','factor_b_pvalue','factor_c_pvalue',
+                                                'interaction_ab_pvalue','interaction_ac_pvalue',
+                                                'interaction_bc_pvalue','interaction_abc_pvalue'])][:10],
+            'ceramides': [s for s in get_ceramides() if s in available_sls][:10],
+            'sphingomyelins': [s for s in get_sphingomyelins() if s in available_sls][:10],
+        }
+
+        for sel_name, selected in conc_selections.items():
+            if not selected:
+                continue
+            tw_stats = {s: results.threeway_individual_sl.get(s) for s in selected
+                       if s in results.threeway_individual_sl}
+            suffix = f"_{sel_name}"
+            try:
+                fig = viz.plot_threeway_multi_panel(
+                    data=data, value_cols=selected,
+                    factor_a_col=fa_col, factor_b_col=fb_col, factor_c_col=fc_col,
+                    threeway_results=tw_stats, ncols=3,
+                    factor_a_name=fa_name, factor_b_name=fb_name, factor_c_name=fc_name,
+                    ylabel=f'Concentration ({settings["units"]})', show_points=settings['show_points'],
+                    plot_type=settings['plot_type'])
+                figures[f'concentrations{suffix}'] = fig
+            except Exception as _e:
+                print(f'Export figure error: {_e}')
+
+        key_totals = ['total_all', 'total_ceramides', 'total_dihydroceramides', 'total_sphingomyelins',
+                      'sphingoid_bases', 'sphingoid_base_phosphates', 'very_long_chain', 'long_chain']
+        available_totals = [t for t in key_totals if t in processed.totals.columns]
+
+        if available_totals:
+            totals_data = pd.concat([data[[fa_col, fb_col, fc_col]].reset_index(drop=True),
+                                     processed.totals[available_totals].loc[data.index].reset_index(drop=True)], axis=1)
+            tw_stats = {t: results.threeway_totals.get(t) for t in available_totals
+                       if t in results.threeway_totals}
+            try:
+                fig = viz.plot_threeway_multi_panel(
+                    data=totals_data, value_cols=available_totals,
+                    factor_a_col=fa_col, factor_b_col=fb_col, factor_c_col=fc_col,
+                    threeway_results=tw_stats, ncols=3,
+                    factor_a_name=fa_name, factor_b_name=fb_name, factor_c_name=fc_name,
+                    ylabel=f'Concentration ({settings["units"]})', show_points=settings['show_points'],
+                    plot_type=settings['plot_type'])
+                figures['totals'] = fig
+            except Exception as _e:
+                print(f'Export figure error: {_e}')
+
+        pct_cols = [col for col in processed.percentages.columns if col.endswith('_pct')]
+        if pct_cols:
+            top_pct = processed.percentages[pct_cols].mean().nlargest(10).index.tolist()
+            display_map = {col: col.replace('_pct', '') for col in top_pct}
+            display_cols = list(display_map.values())
+
+            pct_data = pd.concat([data[[fa_col, fb_col, fc_col]].reset_index(drop=True),
+                                  processed.percentages[top_pct].loc[data.index].reset_index(drop=True)], axis=1)
+            pct_data = pct_data.rename(columns=display_map)
+
+            tw_stats = {}
+            for pct_col in top_pct:
+                disp = pct_col.replace('_pct', '')
+                if pct_col in results.threeway_percentages:
+                    tw_stats[disp] = results.threeway_percentages[pct_col]
+
+            try:
+                fig = viz.plot_threeway_multi_panel(
+                    data=pct_data, value_cols=display_cols,
+                    factor_a_col=fa_col, factor_b_col=fb_col, factor_c_col=fc_col,
+                    threeway_results=tw_stats, ncols=3,
+                    factor_a_name=fa_name, factor_b_name=fb_name, factor_c_name=fc_name,
+                    ylabel='% of Total SL', show_points=settings['show_points'],
+                    plot_type=settings['plot_type'])
+                figures['percentages_top10'] = fig
+            except Exception as _e:
+                print(f'Export figure error: {_e}')
+
+        ratio_cols = [col for col in processed.ratios.columns if not processed.ratios[col].isna().all()]
+        if ratio_cols:
+            selected_ratios = ratio_cols[:9]
+            ratio_data = pd.concat([data[[fa_col, fb_col, fc_col]].reset_index(drop=True),
+                                    processed.ratios[selected_ratios].loc[data.index].reset_index(drop=True)], axis=1)
+            tw_stats = {r: results.threeway_ratios.get(r) for r in selected_ratios
+                       if r in results.threeway_ratios}
+            try:
+                fig = viz.plot_threeway_multi_panel(
+                    data=ratio_data, value_cols=selected_ratios,
+                    factor_a_col=fa_col, factor_b_col=fb_col, factor_c_col=fc_col,
+                    threeway_results=tw_stats, ncols=3,
+                    factor_a_name=fa_name, factor_b_name=fb_name, factor_c_name=fc_name,
+                    ylabel='Ratio', show_points=settings['show_points'],
+                    plot_type=settings['plot_type'])
+                figures['ratios'] = fig
+            except Exception as _e:
+                print(f'Export figure error: {_e}')
+
+    elif is_twoway:
         # =====================================================================
         # TWO-WAY ANOVA EXPORT FIGURES
         # =====================================================================
@@ -377,7 +489,7 @@ def generate_all_export_figures(processed, results, settings):
                     factor_a_col=fa_col, factor_b_col=fb_col,
                     twoway_results=tw_stats, ncols=3,
                     factor_a_name=fa_name, factor_b_name=fb_name,
-                    ylabel='Concentration (ng/mL)', show_points=settings['show_points'],
+                    ylabel=f'Concentration ({settings["units"]})', show_points=settings['show_points'],
                     plot_type=settings['plot_type'])
                 figures[f'concentrations{suffix}'] = fig
             except Exception as _e:
@@ -388,7 +500,7 @@ def generate_all_export_figures(processed, results, settings):
                     factor_a_col=fa_col, factor_b_col=fb_col,
                     twoway_results=tw_stats, ncols=3,
                     factor_a_name=fa_name, factor_b_name=fb_name,
-                    ylabel='Concentration (ng/mL)')
+                    ylabel=f'Concentration ({settings["units"]})')
                 figures[f'concentrations{suffix}_interaction'] = fig_int
             except Exception as _e:
                 print(f'Export figure error: {_e}')
@@ -409,7 +521,7 @@ def generate_all_export_figures(processed, results, settings):
                     factor_a_col=fa_col, factor_b_col=fb_col,
                     twoway_results=tw_stats, ncols=3,
                     factor_a_name=fa_name, factor_b_name=fb_name,
-                    ylabel='Concentration (ng/mL)', show_points=settings['show_points'],
+                    ylabel=f'Concentration ({settings["units"]})', show_points=settings['show_points'],
                     plot_type=settings['plot_type'])
                 figures['totals'] = fig
             except Exception as _e:
@@ -420,7 +532,7 @@ def generate_all_export_figures(processed, results, settings):
                     factor_a_col=fa_col, factor_b_col=fb_col,
                     twoway_results=tw_stats, ncols=3,
                     factor_a_name=fa_name, factor_b_name=fb_name,
-                    ylabel='Concentration (ng/mL)')
+                    ylabel=f'Concentration ({settings["units"]})')
                 figures['totals_interaction'] = fig_int
             except Exception as _e:
                 print(f'Export figure error: {_e}')
@@ -520,7 +632,7 @@ def generate_all_export_figures(processed, results, settings):
                     fig = viz.plot_multi_panel_groups_with_stats(
                         data, selected, group_col, stats_dict, ncols=3,
                         plot_type=settings['plot_type'], log_scale=log_scale,
-                        show_points=settings['show_points'], ylabel='Concentration (ng/mL)')
+                        show_points=settings['show_points'], ylabel=f'Concentration ({settings["units"]})')
                     figures[f'concentrations{suffix}'] = fig
                 except Exception as _e:
                     print(f'Export figure error: {_e}')
@@ -540,7 +652,7 @@ def generate_all_export_figures(processed, results, settings):
                     fig = viz.plot_multi_panel_groups_with_stats(
                         totals_combined, available_totals, group_col, totals_stats, ncols=3,
                         plot_type=settings['plot_type'], log_scale=log_scale,
-                        show_points=settings['show_points'], ylabel='Concentration (ng/mL)')
+                        show_points=settings['show_points'], ylabel=f'Concentration ({settings["units"]})')
                     figures[f'totals{suffix}'] = fig
                 except Exception as _e:
                     print(f'Export figure error: {_e}')
@@ -665,7 +777,20 @@ Total Analytes: {len(processed.structure.sphingolipid_cols)}
 def render_sidebar():
     """Render sidebar settings."""
     st.sidebar.markdown("## ⚙️ Settings")
-    
+
+    st.sidebar.markdown("### 🔬 Sample Preparation")
+    dilution_input = st.sidebar.number_input(
+        "Dilution factor",
+        min_value=0.0,
+        value=float(st.session_state.get('dilution_factor', 1.0)),
+        step=0.1,
+        format="%.4g",
+        help="Multiply all sphingolipid concentrations by this factor after LOD replacement. Use 1.0 for no correction."
+    )
+    if st.sidebar.button("Apply dilution factor"):
+        st.session_state.dilution_factor = dilution_input
+    dilution_factor = float(st.session_state.get('dilution_factor', 1.0))
+
     # LOD Settings
     st.sidebar.markdown("### 📊 Detection Limits")
     st.sidebar.caption("LODs are auto-detected per-analyte from standard curves")
@@ -675,10 +800,19 @@ def render_sidebar():
                                         help="Used only when auto-detection fails for an analyte")
     
     lod_handling = st.sidebar.selectbox("Below LOD handling", [ "lod","half_lod", "zero", "half_min", "drop"],
-                                        format_func=lambda x: {"lod": "LOD value", "half_lod": "LOD/2", 
+                                        format_func=lambda x: {"lod": "LOD value", "half_lod": "LOD/2",
                                                                "zero": "Zero", "half_min": "Min/2", "drop": "NaN"}[x],
                                         help="How to replace below-LOD values (uses per-analyte LOD)")
-    
+
+    units_input = st.sidebar.text_input(
+        "Concentration units",
+        value=st.session_state.get('units', 'ng/mL'),
+        help="Units label shown on concentration and total sphingolipid plots."
+    )
+    if st.sidebar.button("Apply units"):
+        st.session_state.units = units_input
+    units = st.session_state.get('units', 'ng/mL')
+
     st.sidebar.markdown("### 📈 Analysis")
     alpha = st.sidebar.slider("Significance (α)", 0.01, 0.10, 0.05, 0.01)
     plot_type = st.sidebar.selectbox("Plot type", ["box", "violin", "bar", "strip"])
@@ -711,7 +845,8 @@ def render_sidebar():
     
     return {'lod_handling': lod_handling, 'alpha': alpha, 'plot_type': plot_type,
             'show_points': show_points, 'lod_value': lod_value,
-            'color_palette': color_palette, 'plot_style': plot_style}
+            'color_palette': color_palette, 'plot_style': plot_style,
+            'units': units, 'dilution_factor': dilution_factor}
 
 
 def render_concentrations_tab(processed, settings):
@@ -729,18 +864,25 @@ def render_concentrations_tab(processed, settings):
     data = processed.sample_data[processed.sample_data[group_col].notna()].copy()
     data = data[data[group_col].astype(str).str.lower() != 'nan']
     available_sls = processed.structure.sphingolipid_cols
-    
-    # Check if two-way ANOVA
+
+    # Check if two-way / three-way ANOVA
     is_twoway = results is not None and results.is_twoway
-    
+    is_threeway = results is not None and getattr(results, 'is_threeway', False)
+
     col1, col2 = st.columns([1, 2])
     with col1:
         quick = st.selectbox("Quick select", ["Top 10", "Significant", "Ceramides", "Sphingomyelins", "Custom"])
-    
+
     if quick == "Top 10":
         selected = get_top_analytes(processed, 10)
     elif quick == "Significant":
-        if is_twoway:
+        if is_threeway:
+            selected = [s for s in available_sls if s in results.threeway_individual_sl
+                       and any(getattr(results.threeway_individual_sl[s].threeway_result, attr) < settings['alpha']
+                               for attr in ['factor_a_pvalue','factor_b_pvalue','factor_c_pvalue',
+                                            'interaction_ab_pvalue','interaction_ac_pvalue',
+                                            'interaction_bc_pvalue','interaction_abc_pvalue'])][:10]
+        elif is_twoway:
             selected = [s for s in available_sls if s in results.twoway_individual_sl
                        and (results.twoway_individual_sl[s].twoway_result.factor_a_pvalue < settings['alpha']
                             or results.twoway_individual_sl[s].twoway_result.factor_b_pvalue < settings['alpha']
@@ -762,7 +904,48 @@ def render_concentrations_tab(processed, settings):
     log_scale = st.checkbox("Log10 scale", key="conc_log")
     
     if selected:
-        if is_twoway:
+        if is_threeway:
+            # === THREE-WAY ANOVA PLOTS ===
+            fa_col = results.factor_a_col
+            fb_col = results.factor_b_col
+            fc_col = results.factor_c_col
+            fa_name = results.factor_a_name
+            fb_name = results.factor_b_name
+            fc_name = results.factor_c_name
+
+            st.markdown(f"**Three-way ANOVA**: {fa_name} x {fb_name} x {fc_name}")
+
+            tw_stats = {s: results.threeway_individual_sl.get(s) for s in selected
+                       if s in results.threeway_individual_sl}
+
+            fig = viz.plot_threeway_multi_panel(
+                data=data, value_cols=selected,
+                factor_a_col=fa_col, factor_b_col=fb_col, factor_c_col=fc_col,
+                threeway_results=tw_stats, ncols=3,
+                factor_a_name=fa_name, factor_b_name=fb_name, factor_c_name=fc_name,
+                ylabel=f'Concentration ({settings["units"]})', show_points=settings['show_points'],
+                plot_type=settings['plot_type']
+            )
+            st.pyplot(fig)
+            store_figure(fig, 'concentrations_threeway')
+            plt.close(fig)
+
+            with st.expander("Interaction Plots"):
+                fig_int = viz.plot_threeway_interaction_multi_panel(
+                    data=data, value_cols=selected,
+                    factor_a_col=fa_col, factor_b_col=fb_col, factor_c_col=fc_col,
+                    threeway_results=tw_stats, ncols=3,
+                    factor_a_name=fa_name, factor_b_name=fb_name, factor_c_name=fc_name,
+                    ylabel=f'Concentration ({settings["units"]})'
+                )
+                st.pyplot(fig_int)
+                store_figure(fig_int, 'concentrations_interaction_threeway')
+                plt.close(fig_int)
+
+            with st.expander("Three-Way ANOVA Summary"):
+                from modules.report_generation import get_threeway_differences_summary
+                st.dataframe(get_threeway_differences_summary(tw_stats), hide_index=True)
+        elif is_twoway:
             # === TWO-WAY ANOVA PLOTS ===
             fa_col = results.factor_a_col
             fb_col = results.factor_b_col
@@ -779,7 +962,7 @@ def render_concentrations_tab(processed, settings):
                 factor_a_col=fa_col, factor_b_col=fb_col,
                 twoway_results=tw_stats, ncols=3,
                 factor_a_name=fa_name, factor_b_name=fb_name,
-                ylabel='Concentration (ng/mL)', show_points=settings['show_points'],
+                ylabel=f'Concentration ({settings["units"]})', show_points=settings['show_points'],
                 plot_type=settings['plot_type']
             )
             st.pyplot(fig)
@@ -792,7 +975,7 @@ def render_concentrations_tab(processed, settings):
                     factor_a_col=fa_col, factor_b_col=fb_col,
                     twoway_results=tw_stats, ncols=3,
                     factor_a_name=fa_name, factor_b_name=fb_name,
-                    ylabel='Concentration (ng/mL)'
+                    ylabel=f'Concentration ({settings["units"]})'
                 )
                 st.pyplot(fig_int)
                 store_figure(fig_int, 'concentrations_interaction')
@@ -807,14 +990,14 @@ def render_concentrations_tab(processed, settings):
             
             fig = viz.plot_multi_panel_groups_with_stats(data, selected, group_col, stats_dict, 
                                                          ncols=3, plot_type=settings['plot_type'], log_scale=log_scale,
-                                                         show_points=settings['show_points'], ylabel='Concentration (ng/mL)')
+                                                         show_points=settings['show_points'], ylabel=f'Concentration ({settings["units"]})')
             st.pyplot(fig)
             store_figure(fig, f'concentrations{"_log" if log_scale else ""}')
             plt.close(fig)
             
             fig_other = viz.plot_multi_panel_groups_with_stats(data, selected, group_col, stats_dict,
                                                                ncols=3, plot_type=settings['plot_type'], log_scale=not log_scale,
-                                                               show_points=settings['show_points'], ylabel='Concentration (ng/mL)')
+                                                               show_points=settings['show_points'], ylabel=f'Concentration ({settings["units"]})')
             store_figure(fig_other, f'concentrations{"_log" if not log_scale else ""}')
             plt.close(fig_other)
             
@@ -835,13 +1018,39 @@ def render_totals_tab(processed, settings):
     
     data = processed.sample_data[processed.sample_data[group_col].notna()].copy()
     is_twoway = results is not None and results.is_twoway
-    
-    key_totals = ['total_all', 'total_ceramides', 'total_dihydroceramides', 'total_sphingomyelins', 
+    is_threeway = results is not None and getattr(results, 'is_threeway', False)
+
+    key_totals = ['total_all', 'total_ceramides', 'total_dihydroceramides', 'total_sphingomyelins',
                   'sphingoid_bases', 'sphingoid_base_phosphates', 'very_long_chain', 'long_chain']
-    
+
     log_scale = st.checkbox("Log10 scale", key="totals_log")
-    
-    if is_twoway:
+
+    if is_threeway:
+        fa_col = results.factor_a_col
+        fb_col = results.factor_b_col
+        fc_col = results.factor_c_col
+        combined = pd.concat([data[[fa_col, fb_col, fc_col]], processed.totals.loc[data.index]], axis=1)
+        available = [t for t in key_totals if t in combined.columns]
+
+        tw_stats = {t: results.threeway_totals.get(t) for t in available if t in results.threeway_totals}
+
+        fig = viz.plot_threeway_multi_panel(
+            data=combined, value_cols=available,
+            factor_a_col=fa_col, factor_b_col=fb_col, factor_c_col=fc_col,
+            threeway_results=tw_stats, ncols=3,
+            factor_a_name=results.factor_a_name, factor_b_name=results.factor_b_name,
+            factor_c_name=results.factor_c_name,
+            ylabel=f'Concentration ({settings["units"]})', show_points=settings['show_points'],
+            plot_type=settings['plot_type']
+        )
+        st.pyplot(fig)
+        store_figure(fig, 'totals_threeway')
+        plt.close(fig)
+
+        with st.expander("Three-Way ANOVA Summary"):
+            from modules.report_generation import get_threeway_differences_summary
+            st.dataframe(get_threeway_differences_summary(tw_stats), hide_index=True)
+    elif is_twoway:
         fa_col = results.factor_a_col
         fb_col = results.factor_b_col
         combined = pd.concat([data[[fa_col, fb_col]], processed.totals.loc[data.index]], axis=1)
@@ -854,7 +1063,7 @@ def render_totals_tab(processed, settings):
             factor_a_col=fa_col, factor_b_col=fb_col,
             twoway_results=tw_stats, ncols=3,
             factor_a_name=results.factor_a_name, factor_b_name=results.factor_b_name,
-            ylabel='Concentration (ng/mL)', show_points=settings['show_points'],
+            ylabel=f'Concentration ({settings["units"]})', show_points=settings['show_points'],
             plot_type=settings['plot_type']
         )
         st.pyplot(fig)
@@ -871,14 +1080,14 @@ def render_totals_tab(processed, settings):
         
         fig = viz.plot_multi_panel_groups_with_stats(combined, available, group_col, stats_dict,
                                                      ncols=3, plot_type=settings['plot_type'], log_scale=log_scale,
-                                                     show_points=settings['show_points'], ylabel='Concentration (ng/mL)')
+                                                     show_points=settings['show_points'], ylabel=f'Concentration ({settings["units"]})')
         st.pyplot(fig)
         store_figure(fig, f'totals{"_log" if log_scale else ""}')
         plt.close(fig)
         
         fig_other = viz.plot_multi_panel_groups_with_stats(combined, available, group_col, stats_dict,
                                                            ncols=3, plot_type=settings['plot_type'], log_scale=not log_scale,
-                                                           show_points=settings['show_points'], ylabel='Concentration (ng/mL)')
+                                                           show_points=settings['show_points'], ylabel=f'Concentration ({settings["units"]})')
         store_figure(fig_other, f'totals{"_log" if not log_scale else ""}')
         plt.close(fig_other)
         
@@ -894,6 +1103,40 @@ def render_totals_tab(processed, settings):
                         'APA': format_apa_statistics(res)
                     })
             st.dataframe(pd.DataFrame(rows), hide_index=True)
+
+    # =========================================================================
+    # Category Composition Pie Charts (on-demand — memory-intensive)
+    # =========================================================================
+    st.markdown("---")
+    st.markdown("#### Category Composition - Pie Charts")
+    st.caption("Within-category breakdown: individual sphingolipids as percentage of each category total")
+
+    if st.button("Generate Pie Charts", key="gen_cat_pie"):
+        sl_names = processed.structure.sphingolipid_cols
+        if is_threeway:
+            cat_pie_data = data.copy()
+            cat_group_col = '_factorial_group_'
+            cat_pie_data[cat_group_col] = (cat_pie_data[results.factor_a_col].astype(str) + ' - '
+                                           + cat_pie_data[results.factor_b_col].astype(str) + ' - '
+                                           + cat_pie_data[results.factor_c_col].astype(str))
+        elif is_twoway:
+            cat_pie_data = data.copy()
+            cat_group_col = '_factorial_group_'
+            cat_pie_data[cat_group_col] = (cat_pie_data[results.factor_a_col].astype(str) + ' - '
+                                           + cat_pie_data[results.factor_b_col].astype(str))
+        else:
+            cat_pie_data = data
+            cat_group_col = group_col
+
+        fig_cat_pie = viz.plot_category_composition_pie_charts(
+            data=cat_pie_data,
+            group_col=cat_group_col,
+            sphingolipid_cols=sl_names,
+            title='Sphingolipid Category Composition by Group',
+        )
+        st.pyplot(fig_cat_pie)
+        store_figure(fig_cat_pie, 'category_composition_pie')
+        plt.close(fig_cat_pie)
 
 
 def render_percentages_tab(processed, settings):
@@ -917,21 +1160,28 @@ def render_percentages_tab(processed, settings):
     pct_cols = [c for c in percentages.columns if c.endswith('_pct')]
     sl_names = [c.replace('_pct', '') for c in pct_cols]
     
-    # Check if two-way ANOVA
+    # Check if two-way / three-way ANOVA
     is_twoway = results is not None and results.is_twoway
-    
+    is_threeway = results is not None and getattr(results, 'is_threeway', False)
+
     col1, col2 = st.columns([1, 2])
     with col1:
-        quick = st.selectbox("Quick select", 
-                            ["Top 10 by mean %", "Significant", "Ceramides", "Dihydroceramides", 
+        quick = st.selectbox("Quick select",
+                            ["Top 10 by mean %", "Significant", "Ceramides", "Dihydroceramides",
                              "Sphingomyelins", "Very Long Chain", "Custom"],
                             key="pct_quick")
-    
+
     if quick == "Top 10 by mean %":
         top_pcts = percentages[pct_cols].mean().nlargest(10).index.tolist()
         selected_pct_cols = top_pcts
     elif quick == "Significant":
-        if is_twoway:
+        if is_threeway:
+            selected_pct_cols = [c for c in pct_cols if c in results.threeway_percentages
+                               and any(getattr(results.threeway_percentages[c].threeway_result, attr) < settings['alpha']
+                                       for attr in ['factor_a_pvalue','factor_b_pvalue','factor_c_pvalue',
+                                                    'interaction_ab_pvalue','interaction_ac_pvalue',
+                                                    'interaction_bc_pvalue','interaction_abc_pvalue'])][:10]
+        elif is_twoway:
             selected_pct_cols = [c for c in pct_cols if c in results.twoway_percentages
                                and (results.twoway_percentages[c].twoway_result.factor_a_pvalue < settings['alpha']
                                     or results.twoway_percentages[c].twoway_result.factor_b_pvalue < settings['alpha']
@@ -964,7 +1214,13 @@ def render_percentages_tab(processed, settings):
         return
     
     # Show significant findings summary
-    if is_twoway:
+    if is_threeway:
+        sig_pcts = [c for c in selected_pct_cols if c in results.threeway_percentages
+                   and any(getattr(results.threeway_percentages[c].threeway_result, attr) < settings['alpha']
+                           for attr in ['factor_a_pvalue','factor_b_pvalue','factor_c_pvalue',
+                                        'interaction_ab_pvalue','interaction_ac_pvalue',
+                                        'interaction_bc_pvalue','interaction_abc_pvalue'])]
+    elif is_twoway:
         sig_pcts = [c for c in selected_pct_cols if c in results.twoway_percentages
                    and (results.twoway_percentages[c].twoway_result.factor_a_pvalue < settings['alpha']
                         or results.twoway_percentages[c].twoway_result.factor_b_pvalue < settings['alpha']
@@ -989,8 +1245,49 @@ def render_percentages_tab(processed, settings):
     # SECTION 1: Statistical comparison
     # =========================================================================
     st.markdown("#### Statistical Comparison by Group")
-    
-    if is_twoway:
+
+    if is_threeway:
+        # === THREE-WAY ANOVA PLOTS ===
+        fa_col = results.factor_a_col
+        fb_col = results.factor_b_col
+        fc_col = results.factor_c_col
+        fa_name = results.factor_a_name
+        fb_name = results.factor_b_name
+        fc_name = results.factor_c_name
+
+        st.markdown(f"**Three-way ANOVA**: {fa_name} x {fb_name} x {fc_name}")
+
+        tw_stats = {c.replace('_pct', ''): results.threeway_percentages.get(c)
+                   for c in selected_pct_cols if c in results.threeway_percentages}
+
+        pct_plot_data = pd.concat([data[[fa_col, fb_col, fc_col]].reset_index(drop=True),
+                                   percentages[selected_pct_cols].reset_index(drop=True)], axis=1)
+        pct_plot_data = pct_plot_data.rename(columns=display_cols)
+
+        try:
+            fig = viz.plot_threeway_multi_panel(
+                data=pct_plot_data, value_cols=display_names,
+                factor_a_col=fa_col, factor_b_col=fb_col, factor_c_col=fc_col,
+                threeway_results=tw_stats, ncols=3,
+                factor_a_name=fa_name, factor_b_name=fb_name, factor_c_name=fc_name,
+                ylabel='% of Total SL', show_points=settings['show_points'],
+                plot_type=settings['plot_type']
+            )
+            st.pyplot(fig)
+            store_figure(fig, 'percentages_threeway')
+            plt.close(fig)
+        except Exception as e:
+            st.warning(f"Could not generate three-way percentage plot: {e}")
+
+        with st.expander("Three-Way ANOVA Summary"):
+            from modules.report_generation import get_threeway_differences_summary
+            tw_stats_orig = {c: results.threeway_percentages.get(c)
+                           for c in selected_pct_cols if c in results.threeway_percentages}
+            if tw_stats_orig:
+                st.dataframe(get_threeway_differences_summary(tw_stats_orig), hide_index=True)
+            else:
+                st.info("No three-way ANOVA results available for selected percentages.")
+    elif is_twoway:
         # === TWO-WAY ANOVA PLOTS ===
         fa_col = results.factor_a_col
         fb_col = results.factor_b_col
@@ -1068,8 +1365,23 @@ def render_percentages_tab(processed, settings):
     # For two-way designs, use combined factorial groups (e.g., "Aged-Female")
     # =========================================================================
     all_pct_cols = percentages[pct_cols].mean().nlargest(15).index.tolist()
-    
-    if is_twoway:
+
+    if is_threeway:
+        fa_col_comp = results.factor_a_col
+        fb_col_comp = results.factor_b_col
+        fc_col_comp = results.factor_c_col
+        fa_name_comp = results.factor_a_name
+        fb_name_comp = results.factor_b_name
+        fc_name_comp = results.factor_c_name
+        comp_group_col = '_factorial_group_'
+        comp_data = data.copy()
+        comp_data[comp_group_col] = (comp_data[fa_col_comp].astype(str) + ' - ' +
+                                     comp_data[fb_col_comp].astype(str) + ' - ' +
+                                     comp_data[fc_col_comp].astype(str))
+        pie_df = pd.concat([comp_data[[comp_group_col]].reset_index(drop=True),
+                            percentages[all_pct_cols].reset_index(drop=True)], axis=1)
+        comp_title_suffix = f" ({fa_name_comp} x {fb_name_comp} x {fc_name_comp})"
+    elif is_twoway:
         fa_col_comp = results.factor_a_col
         fb_col_comp = results.factor_b_col
         fa_name_comp = results.factor_a_name
@@ -1090,7 +1402,7 @@ def render_percentages_tab(processed, settings):
     st.markdown("---")
     st.markdown("#### Pool Composition - Pie Charts")
     st.caption("Visual breakdown of sphingolipid pool for each group (top contributors)")
-    
+
     fig_pie = viz.plot_composition_pie_charts(
         pie_df, comp_group_col, all_pct_cols,
         title='Sphingolipid Pool Composition by Group' + comp_title_suffix,
@@ -1130,9 +1442,15 @@ def render_percentages_tab(processed, settings):
     # SECTION 5: Statistical Summary Table
     # =========================================================================
     with st.expander("📊 Statistical Summary"):
-        if is_twoway:
+        if is_threeway:
+            from modules.report_generation import get_threeway_differences_summary
+            tw_stats_all = {c: results.threeway_percentages.get(c)
+                          for c in selected_pct_cols if c in results.threeway_percentages}
+            if tw_stats_all:
+                st.dataframe(get_threeway_differences_summary(tw_stats_all), hide_index=True)
+        elif is_twoway:
             from modules.report_generation import get_twoway_differences_summary
-            tw_stats_all = {c: results.twoway_percentages.get(c) 
+            tw_stats_all = {c: results.twoway_percentages.get(c)
                           for c in selected_pct_cols if c in results.twoway_percentages}
             if tw_stats_all:
                 st.dataframe(get_twoway_differences_summary(tw_stats_all), hide_index=True)
@@ -1209,13 +1527,14 @@ def render_ratios_tab(processed, settings):
         st.warning("No ratio data available.")
         return
     
-    # Check if two-way ANOVA
+    # Check if two-way / three-way ANOVA
     is_twoway = results is not None and results.is_twoway
-    
+    is_threeway = results is not None and getattr(results, 'is_threeway', False)
+
     # Quick select options
     col1, col2 = st.columns([1, 2])
     with col1:
-        quick = st.selectbox("Quick select", 
+        quick = st.selectbox("Quick select",
                             ["All ratios", "Significant only", "Key ratios", "Custom"],
                             key="ratio_quick")
     
@@ -1235,7 +1554,13 @@ def render_ratios_tab(processed, settings):
     if quick == "All ratios":
         selected_ratios = available
     elif quick == "Significant only":
-        if is_twoway:
+        if is_threeway:
+            selected_ratios = [r for r in available if r in results.threeway_ratios
+                             and any(getattr(results.threeway_ratios[r].threeway_result, attr) < settings['alpha']
+                                     for attr in ['factor_a_pvalue','factor_b_pvalue','factor_c_pvalue',
+                                                  'interaction_ab_pvalue','interaction_ac_pvalue',
+                                                  'interaction_bc_pvalue','interaction_abc_pvalue'])]
+        elif is_twoway:
             selected_ratios = [r for r in available if r in results.twoway_ratios
                              and (results.twoway_ratios[r].twoway_result.factor_a_pvalue < settings['alpha']
                                   or results.twoway_ratios[r].twoway_result.factor_b_pvalue < settings['alpha']
@@ -1261,7 +1586,13 @@ def render_ratios_tab(processed, settings):
         return
     
     # Show significant findings
-    if is_twoway:
+    if is_threeway:
+        sig_ratios = [r for r in selected_ratios if r in results.threeway_ratios
+                     and any(getattr(results.threeway_ratios[r].threeway_result, attr) < settings['alpha']
+                             for attr in ['factor_a_pvalue','factor_b_pvalue','factor_c_pvalue',
+                                          'interaction_ab_pvalue','interaction_ac_pvalue',
+                                          'interaction_bc_pvalue','interaction_abc_pvalue'])]
+    elif is_twoway:
         sig_ratios = [r for r in selected_ratios if r in results.twoway_ratios
                      and (results.twoway_ratios[r].twoway_result.factor_a_pvalue < settings['alpha']
                           or results.twoway_ratios[r].twoway_result.factor_b_pvalue < settings['alpha']
@@ -1273,14 +1604,51 @@ def render_ratios_tab(processed, settings):
         st.success(f"**Significant differences:** {', '.join(sig_ratios)}")
     
     log_scale = st.checkbox("Log₁₀ scale", key="ratio_log")
-    
-    if is_twoway:
+
+    if is_threeway:
+        fa_col = results.factor_a_col
+        fb_col = results.factor_b_col
+        fc_col = results.factor_c_col
+        fa_name = results.factor_a_name
+        fb_name = results.factor_b_name
+        fc_name = results.factor_c_name
+
+        st.markdown(f"**Three-way ANOVA**: {fa_name} x {fb_name} x {fc_name}")
+
+        tw_stats = {r: results.threeway_ratios.get(r) for r in selected_ratios
+                   if r in results.threeway_ratios}
+
+        ratio_plot_data = pd.concat([data[[fa_col, fb_col, fc_col]].reset_index(drop=True),
+                                     processed.ratios[selected_ratios].loc[data.index].reset_index(drop=True)], axis=1)
+
+        try:
+            fig = viz.plot_threeway_multi_panel(
+                data=ratio_plot_data, value_cols=selected_ratios,
+                factor_a_col=fa_col, factor_b_col=fb_col, factor_c_col=fc_col,
+                threeway_results=tw_stats, ncols=3,
+                factor_a_name=fa_name, factor_b_name=fb_name, factor_c_name=fc_name,
+                ylabel='Ratio', show_points=settings['show_points'],
+                plot_type=settings['plot_type']
+            )
+            st.pyplot(fig)
+            store_figure(fig, 'ratios_threeway')
+            plt.close(fig)
+        except Exception as e:
+            st.warning(f"Could not generate three-way ratio plot: {e}")
+
+        with st.expander("Three-Way ANOVA Summary"):
+            from modules.report_generation import get_threeway_differences_summary
+            if tw_stats:
+                st.dataframe(get_threeway_differences_summary(tw_stats), hide_index=True)
+            else:
+                st.info("No three-way ANOVA results available for selected ratios.")
+    elif is_twoway:
         # === TWO-WAY ANOVA PLOTS ===
         fa_col = results.factor_a_col
         fb_col = results.factor_b_col
         fa_name = results.factor_a_name
         fb_name = results.factor_b_name
-        
+
         st.markdown(f"**Two-way ANOVA**: {fa_name} x {fb_name}")
         
         tw_stats = {r: results.twoway_ratios.get(r) for r in selected_ratios 
@@ -1352,9 +1720,15 @@ def render_ratios_tab(processed, settings):
     
     # Statistical summary
     with st.expander("📊 Statistical Summary"):
-        if is_twoway:
+        if is_threeway:
+            from modules.report_generation import get_threeway_differences_summary
+            tw_all = {r: results.threeway_ratios.get(r) for r in selected_ratios
+                     if r in results.threeway_ratios}
+            if tw_all:
+                st.dataframe(get_threeway_differences_summary(tw_all), hide_index=True)
+        elif is_twoway:
             from modules.report_generation import get_twoway_differences_summary
-            tw_all = {r: results.twoway_ratios.get(r) for r in selected_ratios 
+            tw_all = {r: results.twoway_ratios.get(r) for r in selected_ratios
                      if r in results.twoway_ratios}
             if tw_all:
                 st.dataframe(get_twoway_differences_summary(tw_all), hide_index=True)
@@ -1407,8 +1781,58 @@ def render_statistics_tab(processed, settings):
     st.markdown("### Statistics Summary")
     results = st.session_state.analysis_results
     is_twoway = results is not None and results.is_twoway
-    
-    if is_twoway:
+    is_threeway = results is not None and getattr(results, 'is_threeway', False)
+
+    if is_threeway:
+        st.markdown(f"**Design**: Three-way ANOVA ({results.factor_a_name} x {results.factor_b_name} x {results.factor_c_name})")
+
+        from modules.report_generation import get_threeway_differences_summary
+        from modules.statistical_tests import format_threeway_apa
+
+        def _count_sig_threeway(results_dict):
+            count = 0
+            attrs = ['factor_a_pvalue','factor_b_pvalue','factor_c_pvalue',
+                     'interaction_ab_pvalue','interaction_ac_pvalue',
+                     'interaction_bc_pvalue','interaction_abc_pvalue']
+            for r in results_dict.values():
+                tw = r.threeway_result
+                if any(getattr(tw, a) < settings['alpha'] for a in attrs):
+                    count += 1
+            return count
+
+        sig_t = _count_sig_threeway(results.threeway_totals)
+        sig_s = _count_sig_threeway(results.threeway_individual_sl)
+        sig_p = _count_sig_threeway(results.threeway_percentages)
+        sig_r = _count_sig_threeway(results.threeway_ratios)
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Sig. Totals", f"{sig_t}/{len(results.threeway_totals)}")
+        c2.metric("Sig. SLs", f"{sig_s}/{len(results.threeway_individual_sl)}")
+        c3.metric("Sig. Percentages", f"{sig_p}/{len(results.threeway_percentages)}")
+        c4.metric("Sig. Ratios", f"{sig_r}/{len(results.threeway_ratios)}")
+
+        st.markdown("#### Totals")
+        if results.threeway_totals:
+            st.dataframe(get_threeway_differences_summary(results.threeway_totals), hide_index=True)
+
+        st.markdown("#### Individual Sphingolipids (any significant effect)")
+        attrs_3w = ['factor_a_pvalue','factor_b_pvalue','factor_c_pvalue',
+                    'interaction_ab_pvalue','interaction_ac_pvalue',
+                    'interaction_bc_pvalue','interaction_abc_pvalue']
+        sig_sl = {k: v for k, v in results.threeway_individual_sl.items()
+                  if any(getattr(v.threeway_result, a) < settings['alpha'] for a in attrs_3w)}
+        if sig_sl:
+            st.dataframe(get_threeway_differences_summary(sig_sl), hide_index=True)
+            with st.expander("APA-Formatted Results"):
+                for name, result in list(sig_sl.items())[:10]:
+                    st.markdown(f"**{name}**: {format_threeway_apa(result)}")
+        else:
+            st.info("No significant individual sphingolipid differences (three-way ANOVA).")
+
+        st.markdown("#### Ratios")
+        if results.threeway_ratios:
+            st.dataframe(get_threeway_differences_summary(results.threeway_ratios), hide_index=True)
+    elif is_twoway:
         # === TWO-WAY ANOVA SUMMARY ===
         st.markdown(f"**Design**: Two-way ANOVA ({results.factor_a_name} x {results.factor_b_name})")
         
@@ -1583,20 +2007,7 @@ def render_export_tab(processed, settings):
             st.caption("⭐ = Contains yellow cell highlighting for LOD-replaced values")
         else:
             st.caption("Click the button above to generate a ZIP with all figures, data, and reports.")
-    
-    st.markdown("---")
-    st.markdown("#### Summary Figure")
-    if report_gen and st.button("🎨 Generate Summary Figure", key="gen_summary_fig"):
-        plotter = SignificancePlotter()
-        fig = plotter.plot_multi_panel_with_significance(
-            processed.sample_data, processed.structure.group_col, report_gen,
-            ['Total_All_Sphingolipids', 'Total_Ceramides', 'Total_Dihydroceramides', 'Total_Sphingomyelins'], 2, settings['plot_type'])
-        st.pyplot(fig)
-        store_figure(fig, 'summary')
-        c1, c2 = st.columns(2)
-        c1.download_button("📥 PNG", fig_to_bytes(fig), "summary.png", "image/png", key="download_summary_png")
-        c2.download_button("📥 PDF", fig_to_bytes(fig, 'pdf'), "summary.pdf", "application/pdf", key="download_summary_pdf")
-        plt.close(fig)
+
 
 
 def main():
@@ -1624,7 +2035,11 @@ def main():
             tmp_path = tmp.name
 
         # Get selectable sheets and show dropdown
-        processor = SphingolipidDataProcessor(lod_handling=settings['lod_handling'], lod_value=settings['lod_value'])
+        processor = SphingolipidDataProcessor(
+            lod_handling=settings['lod_handling'],
+            lod_value=settings['lod_value'],
+            dilution_factor=settings['dilution_factor'],
+        )
         try:
             selectable_sheets, auto_detected_sheet = processor.get_selectable_sheets(tmp_path)
         except Exception as e:
@@ -1693,9 +2108,15 @@ def main():
         else:
             st.caption(f"📊 LODs: **Default** ({settings['lod_value']} ng/mL) | Below LOD → **{lod_display[settings['lod_handling']]}** | α = **{settings['alpha']}**")
         
-        # Show two-way factor info if detected
+        # Show multi-factor design info if detected
         n_factors = getattr(processed.structure, 'n_factors', 0)
-        if n_factors >= 2:
+        if n_factors >= 3:
+            factors = processed.structure.factors
+            factor_names = list(factors.keys())
+            factor_source = getattr(processed.structure, 'factor_source', 'unknown')
+            st.info(f"**Three-Way Design Detected**: {factor_names[0]} x {factor_names[1]} x {factor_names[2]} "
+                    f"(from {factor_source.replace('_', ' ')})")
+        elif n_factors >= 2:
             factors = processed.structure.factors
             factor_names = list(factors.keys())
             factor_source = getattr(processed.structure, 'factor_source', 'unknown')
@@ -1753,7 +2174,6 @@ def main():
         - **Values:** Concentrations (typically ng/mL)
         - **Below LOD:** Can be "-----", "LOD", "BLQ", "ND", etc.
         """)
-        st.markdown("""**For Multiple Independent Variables need to add "Factor_" in front of it""")
         st.markdown("**Example:**")
         
         # Create example dataframe

@@ -34,7 +34,8 @@ from config.sphingolipid_species import (
 )
 from modules.statistical_tests import (
     StatisticalAnalyzer, FullAnalysisResult,
-    TwoWayResult, FullTwoWayAnalysisResult, format_twoway_apa
+    TwoWayResult, FullTwoWayAnalysisResult, format_twoway_apa,
+    ThreeWayResult, FullThreeWayAnalysisResult, format_threeway_apa,
 )
 
 
@@ -57,6 +58,26 @@ class ComprehensiveAnalysisResults:
     factor_b_name: str = ""
     factor_a_col: str = ""
     factor_b_col: str = ""
+
+    # Three-way ANOVA results (populated when n_factors == 3)
+    is_threeway: bool = False
+    threeway_individual_sl: Dict[str, FullThreeWayAnalysisResult] = field(default_factory=dict)
+    threeway_totals: Dict[str, FullThreeWayAnalysisResult] = field(default_factory=dict)
+    threeway_ratios: Dict[str, FullThreeWayAnalysisResult] = field(default_factory=dict)
+    threeway_percentages: Dict[str, FullThreeWayAnalysisResult] = field(default_factory=dict)
+    factor_c_name: str = ""
+    factor_c_col: str = ""
+
+    # Log10-transformed mirrors (for dual raw + log10 output)
+    log_individual_sl_results: Dict[str, FullAnalysisResult] = field(default_factory=dict)
+    log_totals_results: Dict[str, FullAnalysisResult] = field(default_factory=dict)
+    log_ratios_results: Dict[str, FullAnalysisResult] = field(default_factory=dict)
+    log_twoway_individual_sl: Dict[str, FullTwoWayAnalysisResult] = field(default_factory=dict)
+    log_twoway_totals: Dict[str, FullTwoWayAnalysisResult] = field(default_factory=dict)
+    log_twoway_ratios: Dict[str, FullTwoWayAnalysisResult] = field(default_factory=dict)
+    log_threeway_individual_sl: Dict[str, FullThreeWayAnalysisResult] = field(default_factory=dict)
+    log_threeway_totals: Dict[str, FullThreeWayAnalysisResult] = field(default_factory=dict)
+    log_threeway_ratios: Dict[str, FullThreeWayAnalysisResult] = field(default_factory=dict)
 
 
 @dataclass
@@ -184,7 +205,56 @@ def get_twoway_differences_summary(results: Dict[str, FullTwoWayAnalysisResult])
             'Post-hoc type': tw.posthoc_type,
             'Sig. post-hoc pairs': n_sig_posthoc,
         })
-    
+
+    return pd.DataFrame(rows)
+
+
+def get_threeway_differences_summary(results: Dict[str, FullThreeWayAnalysisResult]) -> pd.DataFrame:
+    """Create summary table of three-way ANOVA results across all analytes."""
+    rows = []
+    for name, result in results.items():
+        if result is None:
+            continue
+
+        tw = result.threeway_result
+
+        def _stars(p):
+            if np.isnan(p): return ''
+            if p < 0.001: return '***'
+            if p < 0.01: return '**'
+            if p < 0.05: return '*'
+            return ''
+
+        def _fmt(val):
+            return f"{val:.2f}" if not np.isnan(val) else 'N/A'
+
+        def _fmt_p(val):
+            return f"{val:.4f}" if not np.isnan(val) else 'N/A'
+
+        n_sig_posthoc = 0
+        if tw.posthoc_results is not None:
+            n_sig_posthoc = tw.posthoc_results['significant'].sum()
+
+        rows.append({
+            'Variable': name,
+            'Test': tw.test_type.value,
+            f'{tw.factor_a_name} F': _fmt(tw.factor_a_stat),
+            f'{tw.factor_a_name} p': _fmt_p(tw.factor_a_pvalue),
+            f'{tw.factor_a_name} sig': _stars(tw.factor_a_pvalue),
+            f'{tw.factor_b_name} F': _fmt(tw.factor_b_stat),
+            f'{tw.factor_b_name} p': _fmt_p(tw.factor_b_pvalue),
+            f'{tw.factor_b_name} sig': _stars(tw.factor_b_pvalue),
+            f'{tw.factor_c_name} F': _fmt(tw.factor_c_stat),
+            f'{tw.factor_c_name} p': _fmt_p(tw.factor_c_pvalue),
+            f'{tw.factor_c_name} sig': _stars(tw.factor_c_pvalue),
+            f'{tw.factor_a_name}\u00d7{tw.factor_b_name} p': _fmt_p(tw.interaction_ab_pvalue),
+            f'{tw.factor_a_name}\u00d7{tw.factor_c_name} p': _fmt_p(tw.interaction_ac_pvalue),
+            f'{tw.factor_b_name}\u00d7{tw.factor_c_name} p': _fmt_p(tw.interaction_bc_pvalue),
+            f'{tw.factor_a_name}\u00d7{tw.factor_b_name}\u00d7{tw.factor_c_name} p': _fmt_p(tw.interaction_abc_pvalue),
+            'Post-hoc type': tw.posthoc_type,
+            'Sig. post-hoc pairs': n_sig_posthoc,
+        })
+
     return pd.DataFrame(rows)
 
 
@@ -248,6 +318,7 @@ class ExcelReportGenerator:
         # Two-way ANOVA factor info
         factors: Optional[Dict[str, str]] = None,  # {display_name: column_name}
         n_factors: int = 0,
+        units: str = "ng/mL",
     ):
         """
         Initialize report generator.
@@ -275,6 +346,7 @@ class ExcelReportGenerator:
         # Two-way factor info
         self.factors = factors or {}
         self.n_factors = n_factors
+        self.units = units
         
         # Identify sphingolipid columns
         if sphingolipid_cols:
@@ -287,12 +359,35 @@ class ExcelReportGenerator:
         self.analysis_sheets: Dict[str, AnalysisSheet] = {}
         self.results = ComprehensiveAnalysisResults()
     
+    # --- Log10 transform helpers ---
+
+    @staticmethod
+    def _log_transform_column(data: pd.DataFrame, col: str) -> pd.Series:
+        """Log10-transform a column, handling zeros/negatives with a floor value."""
+        vals = pd.to_numeric(data[col], errors='coerce')
+        min_positive = vals[vals > 0].min()
+        floor_val = min_positive / 10 if pd.notna(min_positive) else 0.001
+        return np.log10(vals.clip(lower=floor_val))
+
+    def _prepare_log_data(self, data: pd.DataFrame, col: str) -> Tuple[pd.DataFrame, str]:
+        """Create a copy of data with a log10-transformed column. Returns (data_copy, log_col_name)."""
+        log_col = f'{col}_log10'
+        data_copy = data.copy()
+        data_copy[log_col] = self._log_transform_column(data_copy, col)
+        return data_copy, log_col
+
     def run_all_statistics(self) -> ComprehensiveAnalysisResults:
         """Run all statistical analyses and cache results."""
         # Filter valid groups
         valid_data = self.data[self.data[self.group_col].notna()].copy()
         valid_data = valid_data[valid_data[self.group_col].astype(str).str.lower() != 'nan']
         
+        # ================================================================
+        # THREE-WAY BRANCH: if n_factors == 3, use three-way ANOVA for all
+        # ================================================================
+        if self.n_factors == 3 and len(self.factors) >= 3:
+            return self._run_all_threeway_statistics(valid_data)
+
         # ================================================================
         # TWO-WAY BRANCH: if n_factors == 2, use two-way ANOVA for all
         # ================================================================
@@ -311,7 +406,14 @@ class ExcelReportGenerator:
                     self.results.individual_sl_results[sl] = result
                 except Exception as e:
                     print(f"Could not analyze {sl}: {e}")
-        
+                try:
+                    log_data, log_col = self._prepare_log_data(valid_data, sl)
+                    self.results.log_individual_sl_results[sl] = self.analyzer.analyze(
+                        log_data, log_col, self.group_col
+                    )
+                except Exception as e:
+                    print(f"Could not analyze {sl} (log10): {e}")
+
         # 2. Totals
         if self.totals is not None:
             combined = pd.concat([valid_data[[self.group_col]], self.totals.loc[valid_data.index]], axis=1)
@@ -322,7 +424,14 @@ class ExcelReportGenerator:
                         self.results.totals_results[col] = result
                     except Exception as e:
                         print(f"Could not analyze {col}: {e}")
-        
+                    try:
+                        log_data, log_col = self._prepare_log_data(combined, col)
+                        self.results.log_totals_results[col] = self.analyzer.analyze(
+                            log_data, log_col, self.group_col
+                        )
+                    except Exception as e:
+                        print(f"Could not analyze {col} (log10): {e}")
+
         # 3. Ratios
         if self.ratios is not None:
             combined = pd.concat([valid_data[[self.group_col]], self.ratios.loc[valid_data.index]], axis=1)
@@ -333,6 +442,13 @@ class ExcelReportGenerator:
                         self.results.ratios_results[col] = result
                     except Exception as e:
                         print(f"Could not analyze {col}: {e}")
+                    try:
+                        log_data, log_col = self._prepare_log_data(combined, col)
+                        self.results.log_ratios_results[col] = self.analyzer.analyze(
+                            log_data, log_col, self.group_col
+                        )
+                    except Exception as e:
+                        print(f"Could not analyze {col} (log10): {e}")
         
         # 4. Percentages
         if self.percentages is not None:
@@ -385,7 +501,14 @@ class ExcelReportGenerator:
                     self.results.twoway_individual_sl[sl] = result
                 except Exception as e:
                     print(f"Could not analyze {sl} (two-way): {e}")
-        
+                try:
+                    log_data, log_col = self._prepare_log_data(valid_data, sl)
+                    self.results.log_twoway_individual_sl[sl] = self.analyzer.analyze_twoway(
+                        log_data, log_col, fa_col, fb_col, fa_name, fb_name
+                    )
+                except Exception as e:
+                    print(f"Could not analyze {sl} (two-way log10): {e}")
+
         # 2. Totals
         if self.totals is not None:
             combined = pd.concat([valid_data[[fa_col, fb_col]], self.totals.loc[valid_data.index]], axis=1)
@@ -398,7 +521,14 @@ class ExcelReportGenerator:
                         self.results.twoway_totals[col] = result
                     except Exception as e:
                         print(f"Could not analyze {col} (two-way): {e}")
-        
+                    try:
+                        log_data, log_col = self._prepare_log_data(combined, col)
+                        self.results.log_twoway_totals[col] = self.analyzer.analyze_twoway(
+                            log_data, log_col, fa_col, fb_col, fa_name, fb_name
+                        )
+                    except Exception as e:
+                        print(f"Could not analyze {col} (two-way log10): {e}")
+
         # 3. Ratios
         if self.ratios is not None:
             combined = pd.concat([valid_data[[fa_col, fb_col]], self.ratios.loc[valid_data.index]], axis=1)
@@ -411,6 +541,13 @@ class ExcelReportGenerator:
                         self.results.twoway_ratios[col] = result
                     except Exception as e:
                         print(f"Could not analyze {col} (two-way): {e}")
+                    try:
+                        log_data, log_col = self._prepare_log_data(combined, col)
+                        self.results.log_twoway_ratios[col] = self.analyzer.analyze_twoway(
+                            log_data, log_col, fa_col, fb_col, fa_name, fb_name
+                        )
+                    except Exception as e:
+                        print(f"Could not analyze {col} (two-way log10): {e}")
         
         # 4. Percentages
         if self.percentages is not None:
@@ -430,9 +567,113 @@ class ExcelReportGenerator:
         for cat_name, sheet in self.analysis_sheets.items():
             if sheet.statistical_result:
                 self.results.category_results[cat_name] = sheet.statistical_result
-        
+
         return self.results
-    
+
+    def _run_all_threeway_statistics(self, valid_data: pd.DataFrame) -> ComprehensiveAnalysisResults:
+        """
+        Run three-way ANOVA for all analytes when n_factors == 3.
+
+        This replaces the one-way path entirely when a three-factor
+        design is detected.
+        """
+        factor_items = list(self.factors.items())
+        fa_name, fa_col = factor_items[0]
+        fb_name, fb_col = factor_items[1]
+        fc_name, fc_col = factor_items[2]
+
+        self.results.is_threeway = True
+        self.results.factor_a_name = fa_name
+        self.results.factor_b_name = fb_name
+        self.results.factor_c_name = fc_name
+        self.results.factor_a_col = fa_col
+        self.results.factor_b_col = fb_col
+        self.results.factor_c_col = fc_col
+
+        # Verify factor columns exist in data
+        if fa_col not in valid_data.columns or fb_col not in valid_data.columns or fc_col not in valid_data.columns:
+            print(f"⚠ Factor columns not found in data: {fa_col}, {fb_col}, {fc_col}")
+            return self.results
+
+        # 1. Individual sphingolipids
+        for sl in self.sl_cols:
+            if sl in valid_data.columns:
+                try:
+                    result = self.analyzer.analyze_threeway(
+                        valid_data, sl, fa_col, fb_col, fc_col, fa_name, fb_name, fc_name
+                    )
+                    self.results.threeway_individual_sl[sl] = result
+                except Exception as e:
+                    print(f"Could not analyze {sl} (three-way): {e}")
+                try:
+                    log_data, log_col = self._prepare_log_data(valid_data, sl)
+                    self.results.log_threeway_individual_sl[sl] = self.analyzer.analyze_threeway(
+                        log_data, log_col, fa_col, fb_col, fc_col, fa_name, fb_name, fc_name
+                    )
+                except Exception as e:
+                    print(f"Could not analyze {sl} (three-way log10): {e}")
+
+        # 2. Totals
+        if self.totals is not None:
+            combined = pd.concat([valid_data[[fa_col, fb_col, fc_col]], self.totals.loc[valid_data.index]], axis=1)
+            for col in self.totals.columns:
+                if not combined[col].isna().all():
+                    try:
+                        result = self.analyzer.analyze_threeway(
+                            combined, col, fa_col, fb_col, fc_col, fa_name, fb_name, fc_name
+                        )
+                        self.results.threeway_totals[col] = result
+                    except Exception as e:
+                        print(f"Could not analyze {col} (three-way): {e}")
+                    try:
+                        log_data, log_col = self._prepare_log_data(combined, col)
+                        self.results.log_threeway_totals[col] = self.analyzer.analyze_threeway(
+                            log_data, log_col, fa_col, fb_col, fc_col, fa_name, fb_name, fc_name
+                        )
+                    except Exception as e:
+                        print(f"Could not analyze {col} (three-way log10): {e}")
+
+        # 3. Ratios
+        if self.ratios is not None:
+            combined = pd.concat([valid_data[[fa_col, fb_col, fc_col]], self.ratios.loc[valid_data.index]], axis=1)
+            for col in self.ratios.columns:
+                if not combined[col].isna().all():
+                    try:
+                        result = self.analyzer.analyze_threeway(
+                            combined, col, fa_col, fb_col, fc_col, fa_name, fb_name, fc_name
+                        )
+                        self.results.threeway_ratios[col] = result
+                    except Exception as e:
+                        print(f"Could not analyze {col} (three-way): {e}")
+                    try:
+                        log_data, log_col = self._prepare_log_data(combined, col)
+                        self.results.log_threeway_ratios[col] = self.analyzer.analyze_threeway(
+                            log_data, log_col, fa_col, fb_col, fc_col, fa_name, fb_name, fc_name
+                        )
+                    except Exception as e:
+                        print(f"Could not analyze {col} (three-way log10): {e}")
+
+        # 4. Percentages
+        if self.percentages is not None:
+            combined = pd.concat([valid_data[[fa_col, fb_col, fc_col]], self.percentages.loc[valid_data.index]], axis=1)
+            for col in self.percentages.columns:
+                if not combined[col].isna().all():
+                    try:
+                        result = self.analyzer.analyze_threeway(
+                            combined, col, fa_col, fb_col, fc_col, fa_name, fb_name, fc_name
+                        )
+                        self.results.threeway_percentages[col] = result
+                    except Exception as e:
+                        print(f"Could not analyze {col} (three-way): {e}")
+
+        # 5. Category sheets (one-way still generated for backward compat)
+        self.generate_all_sheets()
+        for cat_name, sheet in self.analysis_sheets.items():
+            if sheet.statistical_result:
+                self.results.category_results[cat_name] = sheet.statistical_result
+
+        return self.results
+
     def _calculate_sheet_data(
         self,
         category_name: str,
@@ -740,12 +981,66 @@ class ExcelReportGenerator:
     
     def save_excel_report(self, filepath) -> Path:
         """Save complete Excel report with all analysis sheets."""
-        
+
         if not self.analysis_sheets:
             self.generate_all_sheets()
-        
+
         with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
-            if self.n_factors >= 2 and self.results.is_twoway:
+            if self.n_factors >= 3 and self.results.is_threeway:
+                # ============================================================
+                # THREE-WAY ANOVA REPORT
+                # ============================================================
+                self._write_threeway_overview_sheet(writer)
+
+                if self.results.threeway_individual_sl:
+                    self._write_threeway_results_sheet(
+                        writer, 'Individual_SL',
+                        'Individual Sphingolipid Three-Way ANOVA',
+                        self.results.threeway_individual_sl
+                    )
+                if self.results.log_threeway_individual_sl:
+                    self._write_threeway_results_sheet(
+                        writer, 'Individual_SL_log10',
+                        'Individual Sphingolipid Three-Way ANOVA (log10)',
+                        self.results.log_threeway_individual_sl
+                    )
+
+                if self.results.threeway_totals:
+                    self._write_threeway_results_sheet(
+                        writer, 'Totals',
+                        'Total Sphingolipid Categories Three-Way ANOVA',
+                        self.results.threeway_totals
+                    )
+                if self.results.log_threeway_totals:
+                    self._write_threeway_results_sheet(
+                        writer, 'Totals_log10',
+                        'Total Sphingolipid Categories Three-Way ANOVA (log10)',
+                        self.results.log_threeway_totals
+                    )
+
+                if self.results.threeway_ratios:
+                    self._write_threeway_results_sheet(
+                        writer, 'Ratios',
+                        'Clinical Ratios Three-Way ANOVA',
+                        self.results.threeway_ratios
+                    )
+                if self.results.log_threeway_ratios:
+                    self._write_threeway_results_sheet(
+                        writer, 'Ratios_log10',
+                        'Clinical Ratios Three-Way ANOVA (log10)',
+                        self.results.log_threeway_ratios
+                    )
+
+                if self.results.threeway_percentages:
+                    self._write_threeway_results_sheet(
+                        writer, 'Percentages',
+                        'Sphingolipid Percentages Three-Way ANOVA',
+                        self.results.threeway_percentages
+                    )
+
+                for sheet_name, sheet in self.analysis_sheets.items():
+                    self._write_sheet(writer, sheet)
+            elif self.n_factors >= 2 and self.results.is_twoway:
                 # ============================================================
                 # TWO-WAY ANOVA REPORT
                 # ============================================================
@@ -758,7 +1053,13 @@ class ExcelReportGenerator:
                         'Individual Sphingolipid Two-Way ANOVA',
                         self.results.twoway_individual_sl
                     )
-                
+                if self.results.log_twoway_individual_sl:
+                    self._write_twoway_results_sheet(
+                        writer, 'Individual_SL_log10',
+                        'Individual Sphingolipid Two-Way ANOVA (log10)',
+                        self.results.log_twoway_individual_sl
+                    )
+
                 # Totals
                 if self.results.twoway_totals:
                     self._write_twoway_results_sheet(
@@ -766,13 +1067,25 @@ class ExcelReportGenerator:
                         'Total Sphingolipid Categories Two-Way ANOVA',
                         self.results.twoway_totals
                     )
-                
+                if self.results.log_twoway_totals:
+                    self._write_twoway_results_sheet(
+                        writer, 'Totals_log10',
+                        'Total Sphingolipid Categories Two-Way ANOVA (log10)',
+                        self.results.log_twoway_totals
+                    )
+
                 # Ratios
                 if self.results.twoway_ratios:
                     self._write_twoway_results_sheet(
                         writer, 'Ratios',
                         'Clinical Ratios Two-Way ANOVA',
                         self.results.twoway_ratios
+                    )
+                if self.results.log_twoway_ratios:
+                    self._write_twoway_results_sheet(
+                        writer, 'Ratios_log10',
+                        'Clinical Ratios Two-Way ANOVA (log10)',
+                        self.results.log_twoway_ratios
                     )
                 
                 # Percentages
@@ -796,7 +1109,25 @@ class ExcelReportGenerator:
                 # Individual sphingolipid concentrations tab
                 if self.results.individual_sl_results:
                     self._write_concentrations_sheet(writer)
-        
+                if self.results.log_individual_sl_results:
+                    self._write_concentrations_sheet(
+                        writer, 'Concentrations_log10',
+                        'INDIVIDUAL SPHINGOLIPID CONCENTRATION COMPARISONS (log10)',
+                        self.results.log_individual_sl_results
+                    )
+                if self.results.log_totals_results:
+                    self._write_concentrations_sheet(
+                        writer, 'Totals_log10',
+                        'SPHINGOLIPID TOTALS COMPARISONS (log10)',
+                        self.results.log_totals_results
+                    )
+                if self.results.log_ratios_results:
+                    self._write_concentrations_sheet(
+                        writer, 'Ratios_log10',
+                        'SPHINGOLIPID RATIO COMPARISONS (log10)',
+                        self.results.log_ratios_results
+                    )
+
         return filepath
     
     def _write_twoway_overview_sheet(self, writer: pd.ExcelWriter):
@@ -1048,14 +1379,186 @@ class ExcelReportGenerator:
                 except:
                     pass
             ws.column_dimensions[column_letter].width = min(max_length + 2, 50)
-    
-    def _write_concentrations_sheet(self, writer: pd.ExcelWriter):
+
+    def _write_threeway_overview_sheet(self, writer: pd.ExcelWriter):
+        """Write overview sheet for three-way ANOVA report."""
+        current_row = 0
+        sheet_name = 'Overview'
+
+        title_df = pd.DataFrame({'': ['SPHINGOLIPID ANALYSIS REPORT \u2014 THREE-WAY ANOVA']})
+        title_df.to_excel(writer, sheet_name=sheet_name, startrow=current_row,
+                         index=False, header=False)
+        current_row += 2
+
+        fa_name = self.results.factor_a_name
+        fb_name = self.results.factor_b_name
+        fc_name = self.results.factor_c_name
+        fa_col = self.results.factor_a_col
+        fb_col = self.results.factor_b_col
+        fc_col = self.results.factor_c_col
+
+        valid_data = self.data[self.data[self.group_col].notna()].copy()
+        valid_data = valid_data[valid_data[self.group_col].astype(str).str.lower() != 'nan']
+
+        fa_levels = sorted(valid_data[fa_col].unique().astype(str))
+        fb_levels = sorted(valid_data[fb_col].unique().astype(str))
+        fc_levels = sorted(valid_data[fc_col].unique().astype(str))
+
+        summary_data = {
+            'Parameter': [
+                'Total Samples', 'Experimental Design',
+                f'Factor A: {fa_name}', f'Factor B: {fb_name}', f'Factor C: {fc_name}',
+                'Sphingolipids Measured', 'Significance Level', 'Non-parametric Method',
+            ],
+            'Value': [
+                len(valid_data), f'{fa_name} x {fb_name} x {fc_name} factorial',
+                ', '.join(fa_levels), ', '.join(fb_levels), ', '.join(fc_levels),
+                len(self.sl_cols), f'\u03b1 = {self.alpha}',
+                'ART ANOVA (when assumptions violated)',
+            ]
+        }
+        summary_df = pd.DataFrame(summary_data)
+        summary_df.to_excel(writer, sheet_name=sheet_name, startrow=current_row, index=False)
+        current_row += len(summary_df) + 3
+
+        for section_title, results_dict in [
+            ('INDIVIDUAL SPHINGOLIPID RESULTS SUMMARY', self.results.threeway_individual_sl),
+            ('TOTAL CATEGORIES RESULTS SUMMARY', self.results.threeway_totals),
+            ('CLINICAL RATIOS RESULTS SUMMARY', self.results.threeway_ratios),
+            ('PERCENTAGE COMPOSITION RESULTS SUMMARY', self.results.threeway_percentages),
+        ]:
+            section_header = pd.DataFrame({'': [section_title]})
+            section_header.to_excel(writer, sheet_name=sheet_name, startrow=current_row,
+                                   index=False, header=False)
+            current_row += 1
+            if results_dict:
+                summary = get_threeway_differences_summary(results_dict)
+                summary.to_excel(writer, sheet_name=sheet_name, startrow=current_row, index=False)
+                current_row += len(summary) + 3
+            else:
+                current_row += 2
+
+        ws = writer.sheets[sheet_name]
+        for column in ws.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            ws.column_dimensions[column_letter].width = min(max_length + 2, 60)
+
+    def _write_threeway_results_sheet(
+        self,
+        writer: pd.ExcelWriter,
+        sheet_name: str,
+        title: str,
+        tw_results: Dict[str, FullThreeWayAnalysisResult]
+    ):
+        """Write a three-way ANOVA results sheet for a category of variables."""
+        sheet_name = sheet_name[:31]
+        current_row = 0
+
+        fa_name = self.results.factor_a_name
+        fb_name = self.results.factor_b_name
+        fc_name = self.results.factor_c_name
+
+        title_df = pd.DataFrame({'': [title]})
+        title_df.to_excel(writer, sheet_name=sheet_name, startrow=current_row,
+                         index=False, header=False)
+        current_row += 1
+        design_df = pd.DataFrame({'': [f'Design: {fa_name} x {fb_name} x {fc_name}']})
+        design_df.to_excel(writer, sheet_name=sheet_name, startrow=current_row,
+                         index=False, header=False)
+        current_row += 2
+
+        section_header = pd.DataFrame({'': ['OMNIBUS RESULTS SUMMARY']})
+        section_header.to_excel(writer, sheet_name=sheet_name, startrow=current_row,
+                               index=False, header=False)
+        current_row += 1
+
+        summary = get_threeway_differences_summary(tw_results)
+        summary.to_excel(writer, sheet_name=sheet_name, startrow=current_row, index=False)
+        current_row += len(summary) + 3
+
+        section_header = pd.DataFrame({'': ['DETAILED ANOVA TABLES']})
+        section_header.to_excel(writer, sheet_name=sheet_name, startrow=current_row,
+                               index=False, header=False)
+        current_row += 2
+
+        for var_name, result in tw_results.items():
+            tw = result.threeway_result
+
+            var_header = pd.DataFrame({'': [f'--- {var_name} ---']})
+            var_header.to_excel(writer, sheet_name=sheet_name, startrow=current_row,
+                               index=False, header=False)
+            current_row += 1
+
+            test_label = pd.DataFrame({'': [f'Test: {tw.test_type.value}']})
+            test_label.to_excel(writer, sheet_name=sheet_name, startrow=current_row,
+                               index=False, header=False)
+            current_row += 1
+
+            if tw.anova_table is not None and not tw.anova_table.empty:
+                tw.anova_table.to_excel(writer, sheet_name=sheet_name,
+                                        startrow=current_row, index=False)
+                current_row += len(tw.anova_table) + 1
+
+            apa_text = format_threeway_apa(result)
+            apa_df = pd.DataFrame({'APA Format': [apa_text]})
+            apa_df.to_excel(writer, sheet_name=sheet_name, startrow=current_row, index=False)
+            current_row += 2
+
+            if result.descriptive_stats is not None and not result.descriptive_stats.empty:
+                desc = result.descriptive_stats.copy()
+                desc = desc[(desc['factor_a'] != '__MARGINAL__') &
+                            (desc['factor_b'] != '__MARGINAL__') &
+                            (desc['factor_c'] != '__MARGINAL__')]
+                if not desc.empty:
+                    desc_header = pd.DataFrame({'': ['Cell Descriptive Statistics']})
+                    desc_header.to_excel(writer, sheet_name=sheet_name, startrow=current_row,
+                                        index=False, header=False)
+                    current_row += 1
+                    desc.to_excel(writer, sheet_name=sheet_name, startrow=current_row, index=False)
+                    current_row += len(desc) + 1
+
+            if tw.posthoc_results is not None and not tw.posthoc_results.empty:
+                ph_header = pd.DataFrame({'': [f'Post-hoc: {tw.posthoc_type}']})
+                ph_header.to_excel(writer, sheet_name=sheet_name, startrow=current_row,
+                                  index=False, header=False)
+                current_row += 1
+                tw.posthoc_results.to_excel(writer, sheet_name=sheet_name,
+                                            startrow=current_row, index=False)
+                current_row += len(tw.posthoc_results) + 1
+
+            current_row += 1
+
+        ws = writer.sheets[sheet_name]
+        for column in ws.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            ws.column_dimensions[column_letter].width = min(max_length + 2, 50)
+
+    def _write_concentrations_sheet(self, writer: pd.ExcelWriter,
+                                    sheet_name: str = 'Concentrations',
+                                    title: str = 'INDIVIDUAL SPHINGOLIPID CONCENTRATION COMPARISONS',
+                                    results_dict: Optional[Dict[str, FullAnalysisResult]] = None):
         """Write individual sphingolipid concentration comparisons sheet."""
-        sheet_name = 'Concentrations'
+        if results_dict is None:
+            results_dict = self.results.individual_sl_results
+        sheet_name = sheet_name[:31]
         current_row = 0
 
         # Title
-        title_df = pd.DataFrame({'': ['INDIVIDUAL SPHINGOLIPID CONCENTRATION COMPARISONS']})
+        title_df = pd.DataFrame({'': [title]})
         title_df.to_excel(writer, sheet_name=sheet_name, startrow=current_row,
                          index=False, header=False)
         current_row += 2
@@ -1067,7 +1570,7 @@ class ExcelReportGenerator:
         current_row += 1
 
         summary_rows = []
-        for sl_name, result in self.results.individual_sl_results.items():
+        for sl_name, result in results_dict.items():
             sig_comparisons = []
             if result.posthoc_test and result.posthoc_test.pairwise_results is not None:
                 sig_pairs = result.posthoc_test.pairwise_results[
@@ -1106,7 +1609,7 @@ class ExcelReportGenerator:
                                index=False, header=False)
         current_row += 2
 
-        for sl_name, result in self.results.individual_sl_results.items():
+        for sl_name, result in results_dict.items():
             # Analyte header
             var_header = pd.DataFrame({'': [f'--- {sl_name} ---']})
             var_header.to_excel(writer, sheet_name=sheet_name, startrow=current_row,
@@ -1506,7 +2009,7 @@ class SignificancePlotter:
             # Format
             ax.set_title(category.replace('_', ' '), fontsize=11, fontweight='bold')
             ax.set_xlabel('')
-            ax.set_ylabel('Concentration (ng/mL)', fontsize=9)
+            ax.set_ylabel(f'Concentration ({report_generator.units})', fontsize=9)
             ax.tick_params(axis='x', rotation=0)
             ax.spines['top'].set_visible(False)
             ax.spines['right'].set_visible(False)

@@ -32,16 +32,20 @@ class TestType(Enum):
     TTEST_INDEPENDENT = "independent_t_test"
     TTEST_WELCH = "welch_t_test"
     MANN_WHITNEY = "mann_whitney_u"
-    
+
     # Multi-group tests (one-way)
     ANOVA_ONEWAY = "one_way_anova"
     ANOVA_WELCH = "welch_anova"
     KRUSKAL_WALLIS = "kruskal_wallis"
-    
+
     # Two-way factorial tests
     ANOVA_TWOWAY = "two_way_anova"
     ART_ANOVA = "art_anova"  # Aligned Rank Transform (non-parametric two-way)
-    
+
+    # Three-way factorial tests
+    ANOVA_THREEWAY = "three_way_anova"
+    ART_ANOVA_THREEWAY = "art_anova_threeway"
+
     # Post-hoc tests
     TUKEY_HSD = "tukey_hsd"
     GAMES_HOWELL = "games_howell"
@@ -121,7 +125,7 @@ class TwoWayResult:
     test_type: TestType  # ANOVA_TWOWAY or ART_ANOVA
     factor_a_name: str
     factor_b_name: str
-    
+
     # Main effects and interaction
     factor_a_stat: float = np.nan
     factor_a_pvalue: float = np.nan
@@ -133,17 +137,17 @@ class TwoWayResult:
     interaction_pvalue: float = np.nan
     interaction_df: Tuple = (0, 0)
     interaction_significant: bool = False
-    
+
     # Effect sizes (partial eta-squared)
     effect_sizes: Dict[str, float] = field(default_factory=dict)
-    
+
     # Post-hoc results
     posthoc_results: Optional[pd.DataFrame] = None
     posthoc_type: str = ""  # "simple_main_effects" or "main_effect_marginal"
-    
+
     # ANOVA table (Source, SS, df, MS, F, p, partial_eta_sq)
     anova_table: Optional[pd.DataFrame] = None
-    
+
     alpha: float = 0.05
 
 
@@ -153,6 +157,67 @@ class FullTwoWayAnalysisResult:
     variable_name: str
     twoway_result: TwoWayResult
     descriptive_stats: Optional[pd.DataFrame] = None  # Cell means (FactorA x FactorB)
+    assumption_notes: str = ""
+
+
+@dataclass
+class ThreeWayResult:
+    """Results from a three-way ANOVA (parametric or ART)."""
+    test_type: TestType  # ANOVA_THREEWAY or ART_ANOVA_THREEWAY
+    factor_a_name: str
+    factor_b_name: str
+    factor_c_name: str
+
+    # Main effects
+    factor_a_stat: float = np.nan
+    factor_a_pvalue: float = np.nan
+    factor_a_df: Tuple = (0, 0)
+    factor_b_stat: float = np.nan
+    factor_b_pvalue: float = np.nan
+    factor_b_df: Tuple = (0, 0)
+    factor_c_stat: float = np.nan
+    factor_c_pvalue: float = np.nan
+    factor_c_df: Tuple = (0, 0)
+
+    # Two-way interactions
+    interaction_ab_stat: float = np.nan
+    interaction_ab_pvalue: float = np.nan
+    interaction_ab_df: Tuple = (0, 0)
+    interaction_ab_significant: bool = False
+    interaction_ac_stat: float = np.nan
+    interaction_ac_pvalue: float = np.nan
+    interaction_ac_df: Tuple = (0, 0)
+    interaction_ac_significant: bool = False
+    interaction_bc_stat: float = np.nan
+    interaction_bc_pvalue: float = np.nan
+    interaction_bc_df: Tuple = (0, 0)
+    interaction_bc_significant: bool = False
+
+    # Three-way interaction
+    interaction_abc_stat: float = np.nan
+    interaction_abc_pvalue: float = np.nan
+    interaction_abc_df: Tuple = (0, 0)
+    interaction_abc_significant: bool = False
+
+    # Effect sizes (partial eta-squared)
+    effect_sizes: Dict[str, float] = field(default_factory=dict)
+
+    # Post-hoc results
+    posthoc_results: Optional[pd.DataFrame] = None
+    posthoc_type: str = ""  # "simple_effects" or "main_effect_marginal"
+
+    # ANOVA table (Source, SS, df, MS, F, p, partial_eta_sq)
+    anova_table: Optional[pd.DataFrame] = None
+
+    alpha: float = 0.05
+
+
+@dataclass
+class FullThreeWayAnalysisResult:
+    """Complete three-way analysis results for a variable."""
+    variable_name: str
+    threeway_result: ThreeWayResult
+    descriptive_stats: Optional[pd.DataFrame] = None  # Cell means (A x B x C)
     assumption_notes: str = ""
 
 
@@ -815,24 +880,47 @@ class StatisticalAnalyzer:
         Returns:
             FullAnalysisResult with all analysis components
         """
+        # Skip analysis if data has near-zero variance (e.g. all LOD-replaced)
+        clean = data[[value_col, group_col]].dropna().copy()
+        clean[value_col] = pd.to_numeric(clean[value_col], errors='coerce')
+        clean = clean.dropna()
+        if clean[value_col].std() < 1e-10:
+            assumptions = AssumptionResults(
+                recommendation_reason="Skipped: near-zero variance (all values identical, e.g. LOD-replaced)"
+            )
+            main_result = StatisticalResult(
+                test_type=TestType.MANN_WHITNEY,
+                statistic=np.nan,
+                pvalue=np.nan,
+                groups_compared=clean[group_col].unique().tolist(),
+                alpha=self.alpha
+            )
+            descriptives = self.get_descriptive_stats(data, value_col, group_col)
+            return FullAnalysisResult(
+                variable_name=value_col,
+                assumptions=assumptions,
+                main_test=main_result,
+                descriptive_stats=descriptives
+            )
+
         # Check assumptions
         assumptions = self.check_assumptions(data, value_col, group_col)
-        
+
         # Run main test
         main_result = self.run_test(
-            data, value_col, group_col, 
+            data, value_col, group_col,
             assumptions.recommended_test
         )
-        
+
         # Descriptive stats
         descriptives = self.get_descriptive_stats(data, value_col, group_col)
-        
+
         # Post-hoc if needed
         posthoc = None
         n_groups = len(data[group_col].unique())
         if run_posthoc and n_groups > 2 and main_result.significant:
             posthoc = self.run_posthoc(data, value_col, group_col, assumptions)
-        
+
         return FullAnalysisResult(
             variable_name=value_col,
             assumptions=assumptions,
@@ -840,11 +928,11 @@ class StatisticalAnalyzer:
             posthoc_test=posthoc,
             descriptive_stats=descriptives
         )
-    
+
     # ================================================================
     # TWO-WAY ANOVA METHODS (fully additive — no changes to one-way)
     # ================================================================
-    
+
     def analyze_twoway(
         self,
         data: pd.DataFrame,
@@ -856,39 +944,46 @@ class StatisticalAnalyzer:
     ) -> FullTwoWayAnalysisResult:
         """
         Perform complete two-way factorial ANOVA analysis.
-        
-        Automatically selects between parametric two-way ANOVA and 
-        non-parametric ART (Aligned Rank Transform) ANOVA based on 
+
+        Automatically selects between parametric two-way ANOVA and
+        non-parametric ART (Aligned Rank Transform) ANOVA based on
         assumption checks.
-        
-        Args:
-            data: DataFrame with values and factor columns
-            value_col: Column name for the numeric dependent variable
-            factor_a_col: Column name for Factor A
-            factor_b_col: Column name for Factor B
-            factor_a_name: Display name for Factor A (defaults to column name)
-            factor_b_name: Display name for Factor B (defaults to column name)
-            
-        Returns:
-            FullTwoWayAnalysisResult with all analysis components
         """
         fa_name = factor_a_name or factor_a_col
         fb_name = factor_b_name or factor_b_col
-        
+
         # Clean data
         df = data[[value_col, factor_a_col, factor_b_col]].dropna().copy()
         df[value_col] = pd.to_numeric(df[value_col], errors='coerce')
         df = df.dropna()
-        
+
         # Ensure factors are categorical strings
         df[factor_a_col] = df[factor_a_col].astype(str).str.strip()
         df[factor_b_col] = df[factor_b_col].astype(str).str.strip()
-        
+
+        # Skip analysis if data has near-zero variance (e.g. all LOD-replaced)
+        if df[value_col].std() < 1e-10:
+            skip_result = TwoWayResult(
+                test_type=TestType.ANOVA_TWOWAY,
+                factor_a_name=fa_name,
+                factor_b_name=fb_name,
+                alpha=self.alpha
+            )
+            descriptives = self._get_twoway_descriptive_stats(
+                df, value_col, factor_a_col, factor_b_col
+            )
+            return FullTwoWayAnalysisResult(
+                variable_name=value_col,
+                twoway_result=skip_result,
+                descriptive_stats=descriptives,
+                assumption_notes="Skipped: near-zero variance (all values identical, e.g. LOD-replaced)"
+            )
+
         # Check assumptions and select test
         use_parametric, assumption_notes = self._recommend_twoway_test(
             df, value_col, factor_a_col, factor_b_col
         )
-        
+
         # Run the appropriate two-way test
         if use_parametric:
             twoway_result = self._run_twoway_parametric(
@@ -898,24 +993,24 @@ class StatisticalAnalyzer:
             twoway_result = self._run_art_anova(
                 df, value_col, factor_a_col, factor_b_col, fa_name, fb_name
             )
-        
+
         # Run post-hoc tests based on interaction significance
         twoway_result = self._run_twoway_posthoc(
             df, value_col, factor_a_col, factor_b_col, twoway_result
         )
-        
+
         # Cell descriptive statistics (Factor A x Factor B means)
         descriptives = self._get_twoway_descriptive_stats(
             df, value_col, factor_a_col, factor_b_col
         )
-        
+
         return FullTwoWayAnalysisResult(
             variable_name=value_col,
             twoway_result=twoway_result,
             descriptive_stats=descriptives,
             assumption_notes=assumption_notes
         )
-    
+
     def _recommend_twoway_test(
         self,
         data: pd.DataFrame,
@@ -923,24 +1018,19 @@ class StatisticalAnalyzer:
         factor_a_col: str,
         factor_b_col: str
     ) -> Tuple[bool, str]:
-        """
-        Check assumptions for two-way ANOVA and recommend parametric vs ART.
-        
-        Returns:
-            Tuple of (use_parametric: bool, assumption_notes: str)
-        """
+        """Check assumptions for two-way ANOVA and recommend parametric vs ART."""
         notes = []
         normality_ok = True
         homogeneity_ok = True
-        
+
         # Check normality within each cell (Factor A x Factor B combination)
         cells = data.groupby([factor_a_col, factor_b_col])
         group_arrays = []
-        
+
         for (a, b), group_df in cells:
             values = group_df[value_col].dropna().values
             group_arrays.append(values)
-            
+
             if len(values) >= self.min_sample_for_normality:
                 _, p, passed = self.check_normality(values, f"{a}_{b}")
                 if not passed:
@@ -948,7 +1038,7 @@ class StatisticalAnalyzer:
                     notes.append(f"Normality violated in cell ({a}, {b}), p={p:.4f}")
             elif len(values) < 3:
                 notes.append(f"Cell ({a}, {b}) has n={len(values)}, too small for normality test")
-        
+
         # Check homogeneity of variances across cells
         valid_groups = [g for g in group_arrays if len(g) >= 2]
         if len(valid_groups) >= 2:
@@ -958,27 +1048,25 @@ class StatisticalAnalyzer:
             if not homo_passed:
                 homogeneity_ok = False
                 notes.append(f"Homogeneity of variances violated (Levene's p={homo_p:.4f})")
-        
+
         # Check minimum cell sizes
         min_cell_n = min(len(g) for g in group_arrays) if group_arrays else 0
         if min_cell_n < self.MIN_PARAMETRIC_N:
             notes.append(f"Minimum cell size n={min_cell_n} is below threshold ({self.MIN_PARAMETRIC_N})")
-        
-        # Decision: use parametric if normality and homogeneity are met
-        # and cell sizes are adequate
+
         use_parametric = (
-            normality_ok and 
-            homogeneity_ok and 
+            normality_ok and
+            homogeneity_ok and
             min_cell_n >= self.MIN_PARAMETRIC_N
         )
-        
+
         if use_parametric:
             notes.insert(0, "Using parametric two-way ANOVA: assumptions met")
         else:
             notes.insert(0, "Using ART ANOVA (non-parametric): one or more assumptions violated")
-        
+
         return use_parametric, "; ".join(notes)
-    
+
     def _run_twoway_parametric(
         self,
         data: pd.DataFrame,
@@ -988,42 +1076,35 @@ class StatisticalAnalyzer:
         fa_name: str,
         fb_name: str
     ) -> TwoWayResult:
-        """
-        Run parametric two-way ANOVA using Type II sum of squares.
-        
-        Uses statsmodels OLS + ANOVA table. Falls back to a manual
-        implementation if statsmodels is unavailable.
-        """
+        """Run parametric two-way ANOVA using Type II sum of squares."""
         result = TwoWayResult(
             test_type=TestType.ANOVA_TWOWAY,
             factor_a_name=fa_name,
             factor_b_name=fb_name,
             alpha=self.alpha
         )
-        
+
         try:
             import statsmodels.api as sm
             from statsmodels.formula.api import ols
             from statsmodels.stats.anova import anova_lm
-            
-            # Sanitize column names for formula (replace spaces/special chars)
-            df = data.copy()
+
+            # Sanitize column names for formula
+            df = data[[value_col, factor_a_col, factor_b_col]].copy()
             safe_val = 'Y_value'
             safe_a = 'Factor_A'
             safe_b = 'Factor_B'
             df[safe_val] = df[value_col]
             df[safe_a] = df[factor_a_col]
             df[safe_b] = df[factor_b_col]
-            
+
             # Fit the full model with interaction
             formula = f'{safe_val} ~ C({safe_a}) * C({safe_b})'
             model = ols(formula, data=df).fit()
-            
+
             # Type II ANOVA table
             anova_tbl = anova_lm(model, typ=2)
-            
-            # Extract results - statsmodels uses C(Factor_A), C(Factor_B), C(Factor_A):C(Factor_B)
-            # Find the right row names
+
             for idx in anova_tbl.index:
                 idx_str = str(idx)
                 if 'Factor_A' in idx_str and 'Factor_B' not in idx_str:
@@ -1038,10 +1119,10 @@ class StatisticalAnalyzer:
                     result.interaction_stat = anova_tbl.loc[idx, 'F']
                     result.interaction_pvalue = anova_tbl.loc[idx, 'PR(>F)']
                     result.interaction_df = (anova_tbl.loc[idx, 'df'], anova_tbl.loc['Residual', 'df'])
-            
+
             result.interaction_significant = result.interaction_pvalue < self.alpha
-            
-            # Calculate partial eta-squared for each effect
+
+            # Calculate partial eta-squared
             ss_residual = anova_tbl.loc['Residual', 'sum_sq']
             for idx in anova_tbl.index:
                 if idx == 'Residual':
@@ -1049,25 +1130,21 @@ class StatisticalAnalyzer:
                 idx_str = str(idx)
                 ss_effect = anova_tbl.loc[idx, 'sum_sq']
                 partial_eta_sq = ss_effect / (ss_effect + ss_residual) if (ss_effect + ss_residual) > 0 else 0
-                
+
                 if 'Factor_A' in idx_str and 'Factor_B' not in idx_str:
                     result.effect_sizes[fa_name] = round(partial_eta_sq, 4)
                 elif 'Factor_B' in idx_str and 'Factor_A' not in idx_str:
                     result.effect_sizes[fb_name] = round(partial_eta_sq, 4)
                 elif 'Factor_A' in idx_str and 'Factor_B' in idx_str:
-                    result.effect_sizes[f'{fa_name}×{fb_name}'] = round(partial_eta_sq, 4)
-            
+                    result.effect_sizes[f'{fa_name}\u00d7{fb_name}'] = round(partial_eta_sq, 4)
+
             # Build clean ANOVA table for reporting
             clean_tbl = pd.DataFrame({
-                'Source': [fa_name, fb_name, f'{fa_name}×{fb_name}', 'Residual'],
-                'SS': [np.nan]*4,
-                'df': [np.nan]*4,
-                'MS': [np.nan]*4,
-                'F': [np.nan]*4,
-                'p': [np.nan]*4,
-                'partial_η²': [np.nan]*4,
+                'Source': [fa_name, fb_name, f'{fa_name}\u00d7{fb_name}', 'Residual'],
+                'SS': [np.nan]*4, 'df': [np.nan]*4, 'MS': [np.nan]*4,
+                'F': [np.nan]*4, 'p': [np.nan]*4, 'partial_\u03b7\u00b2': [np.nan]*4,
             })
-            
+
             row_map = {}
             for idx in anova_tbl.index:
                 idx_str = str(idx)
@@ -1079,7 +1156,7 @@ class StatisticalAnalyzer:
                     row_map[1] = idx
                 elif 'Factor_A' in idx_str and 'Factor_B' in idx_str:
                     row_map[2] = idx
-            
+
             for clean_row, sm_idx in row_map.items():
                 clean_tbl.loc[clean_row, 'SS'] = round(anova_tbl.loc[sm_idx, 'sum_sq'], 4)
                 clean_tbl.loc[clean_row, 'df'] = int(anova_tbl.loc[sm_idx, 'df'])
@@ -1090,19 +1167,19 @@ class StatisticalAnalyzer:
                     clean_tbl.loc[clean_row, 'p'] = anova_tbl.loc[sm_idx, 'PR(>F)']
                 if clean_row < 3:
                     source_name = clean_tbl.loc[clean_row, 'Source']
-                    clean_tbl.loc[clean_row, 'partial_η²'] = result.effect_sizes.get(source_name, np.nan)
-            
+                    clean_tbl.loc[clean_row, 'partial_\u03b7\u00b2'] = result.effect_sizes.get(source_name, np.nan)
+
             result.anova_table = clean_tbl
-            
+
         except ImportError:
             warnings.warn("statsmodels not available; falling back to ART ANOVA")
             return self._run_art_anova(data, value_col, factor_a_col, factor_b_col, fa_name, fb_name)
         except Exception as e:
             warnings.warn(f"Parametric two-way ANOVA failed: {e}; falling back to ART ANOVA")
             return self._run_art_anova(data, value_col, factor_a_col, factor_b_col, fa_name, fb_name)
-        
+
         return result
-    
+
     def _run_art_anova(
         self,
         data: pd.DataFrame,
@@ -1114,14 +1191,11 @@ class StatisticalAnalyzer:
     ) -> TwoWayResult:
         """
         Aligned Rank Transform (ART) ANOVA — non-parametric two-way test.
-        
+
         ART procedure (Wobbrock et al., 2011):
-        1. For each effect (A, B, A×B), strip out all OTHER effects from the data
+        1. For each effect (A, B, AxB), strip out all OTHER effects from the data
         2. Rank the aligned (stripped) residuals
         3. Run standard ANOVA on the aligned ranks
-        
-        This preserves the ability to test main effects and interactions
-        without parametric assumptions.
         """
         result = TwoWayResult(
             test_type=TestType.ART_ANOVA,
@@ -1129,71 +1203,57 @@ class StatisticalAnalyzer:
             factor_b_name=fb_name,
             alpha=self.alpha
         )
-        
-        df = data.copy()
+
+        df = data[[value_col, factor_a_col, factor_b_col]].copy()
         Y = df[value_col].values.astype(float)
-        
-        # Encode factors
+
         levels_a = sorted(df[factor_a_col].unique())
         levels_b = sorted(df[factor_b_col].unique())
-        
-        # Calculate cell means, marginal means, and grand mean
+
         grand_mean = np.mean(Y)
-        
-        # Marginal means for Factor A
+
         marginal_a = {}
         for a in levels_a:
             mask = df[factor_a_col] == a
             marginal_a[a] = np.mean(Y[mask])
-        
-        # Marginal means for Factor B
+
         marginal_b = {}
         for b in levels_b:
             mask = df[factor_b_col] == b
             marginal_b[b] = np.mean(Y[mask])
-        
-        # Cell means
+
         cell_means = {}
         for a in levels_a:
             for b in levels_b:
                 mask = (df[factor_a_col] == a) & (df[factor_b_col] == b)
                 vals = Y[mask]
                 cell_means[(a, b)] = np.mean(vals) if len(vals) > 0 else grand_mean
-        
+
         n = len(Y)
-        
+        from scipy.stats import rankdata
+
         # === ART for Factor A ===
-        # Aligned = Y - (marginal_b - grand_mean) - (cell_mean - marginal_a - marginal_b + grand_mean)
-        # Simplified: aligned_A[i] = Y[i] - marginal_b[b_i] - cell_mean[a_i,b_i] + marginal_a[a_i] + grand_mean
-        # Actually the standard ART alignment for effect of A:
-        # aligned_A = Y - cell_mean + marginal_a_effect (which is marginal_a - grand_mean)
-        # More precisely: strip out B effect and interaction, keep A effect
         aligned_a = np.zeros(n)
         for i in range(n):
             a_i = df.iloc[i][factor_a_col]
             b_i = df.iloc[i][factor_b_col]
-            # Strip B main effect and AB interaction: keep only A main effect + residual
             aligned_a[i] = Y[i] - (marginal_b[b_i] - grand_mean) - (cell_means[(a_i, b_i)] - marginal_a[a_i] - marginal_b[b_i] + grand_mean)
-        
-        # Rank the aligned values
-        from scipy.stats import rankdata
+
         ranks_a = rankdata(aligned_a)
-        
-        # Run one-way ANOVA on ranks grouped by Factor A
         groups_a = [ranks_a[df[factor_a_col] == a] for a in levels_a]
         if all(len(g) > 0 for g in groups_a):
             f_a, p_a = stats.f_oneway(*groups_a)
             result.factor_a_stat = f_a
             result.factor_a_pvalue = p_a
             result.factor_a_df = (len(levels_a) - 1, n - len(levels_a) * len(levels_b))
-        
+
         # === ART for Factor B ===
         aligned_b = np.zeros(n)
         for i in range(n):
             a_i = df.iloc[i][factor_a_col]
             b_i = df.iloc[i][factor_b_col]
             aligned_b[i] = Y[i] - (marginal_a[a_i] - grand_mean) - (cell_means[(a_i, b_i)] - marginal_a[a_i] - marginal_b[b_i] + grand_mean)
-        
+
         ranks_b = rankdata(aligned_b)
         groups_b = [ranks_b[df[factor_b_col] == b] for b in levels_b]
         if all(len(g) > 0 for g in groups_b):
@@ -1201,39 +1261,31 @@ class StatisticalAnalyzer:
             result.factor_b_stat = f_b
             result.factor_b_pvalue = p_b
             result.factor_b_df = (len(levels_b) - 1, n - len(levels_a) * len(levels_b))
-        
-        # === ART for Interaction A×B ===
+
+        # === ART for Interaction AxB ===
         aligned_ab = np.zeros(n)
         for i in range(n):
             a_i = df.iloc[i][factor_a_col]
             b_i = df.iloc[i][factor_b_col]
-            # Strip both main effects, keep interaction
             aligned_ab[i] = Y[i] - (marginal_a[a_i] - grand_mean) - (marginal_b[b_i] - grand_mean)
-        
+
         ranks_ab = rankdata(aligned_ab)
-        
-        # For interaction, group by cell (A×B combination)
+
         cell_labels = df[factor_a_col].astype(str) + '_' + df[factor_b_col].astype(str)
         unique_cells = sorted(cell_labels.unique())
         groups_ab = [ranks_ab[cell_labels == cell] for cell in unique_cells]
         if all(len(g) > 0 for g in groups_ab) and len(groups_ab) > 1:
             f_ab, p_ab = stats.f_oneway(*groups_ab)
-            # Correct F for interaction: the one-way F on cells conflates main effects
-            # True interaction df = (a-1)*(b-1), total cells = a*b
-            # We need to partition: F_interaction from the between-cell variation
-            # minus main effects. Use the approximation for balanced/near-balanced designs.
             n_a = len(levels_a)
             n_b = len(levels_b)
             df_interaction = (n_a - 1) * (n_b - 1)
             df_residual = n - n_a * n_b
-            
-            # For the interaction ART, we need ANOVA on ranks with both factors
-            # Use the residual approach
+
             try:
                 import statsmodels.api as sm
                 from statsmodels.formula.api import ols as sm_ols
                 from statsmodels.stats.anova import anova_lm as sm_anova_lm
-                
+
                 art_df = pd.DataFrame({
                     'rank_ab': ranks_ab,
                     'A': df[factor_a_col].values,
@@ -1241,51 +1293,49 @@ class StatisticalAnalyzer:
                 })
                 model_ab = sm_ols('rank_ab ~ C(A) * C(B)', data=art_df).fit()
                 art_table = sm_anova_lm(model_ab, typ=2)
-                
+
                 for idx in art_table.index:
                     idx_str = str(idx)
-                    if ':' in idx_str or '*' in idx_str:  # Interaction term
+                    if ':' in idx_str or '*' in idx_str:
                         result.interaction_stat = art_table.loc[idx, 'F']
                         result.interaction_pvalue = art_table.loc[idx, 'PR(>F)']
-                        result.interaction_df = (int(art_table.loc[idx, 'df']), 
+                        result.interaction_df = (int(art_table.loc[idx, 'df']),
                                                   int(art_table.loc['Residual', 'df']))
                         break
             except (ImportError, Exception):
-                # Fallback: use the one-way F on interaction-aligned ranks
                 result.interaction_stat = f_ab
                 result.interaction_pvalue = p_ab
                 result.interaction_df = (df_interaction, df_residual)
-        
+
         result.interaction_significant = result.interaction_pvalue < self.alpha
-        
+
         # Calculate approximate partial eta-squared from F and df
         for label, f_val, df_tup in [
             (fa_name, result.factor_a_stat, result.factor_a_df),
             (fb_name, result.factor_b_stat, result.factor_b_df),
-            (f'{fa_name}×{fb_name}', result.interaction_stat, result.interaction_df)
+            (f'{fa_name}\u00d7{fb_name}', result.interaction_stat, result.interaction_df)
         ]:
             denom = f_val * df_tup[0] + df_tup[1]
             if not np.isnan(f_val) and np.isfinite(f_val) and df_tup[1] > 0 and denom > 0:
-                # partial η² ≈ (F * df_num) / (F * df_num + df_den)
                 eta = (f_val * df_tup[0]) / denom
                 result.effect_sizes[label] = round(max(0, eta), 4)
-        
+
         # Build ANOVA table
         result.anova_table = pd.DataFrame({
-            'Source': [fa_name, fb_name, f'{fa_name}×{fb_name}'],
+            'Source': [fa_name, fb_name, f'{fa_name}\u00d7{fb_name}'],
             'F': [result.factor_a_stat, result.factor_b_stat, result.interaction_stat],
             'df_num': [result.factor_a_df[0], result.factor_b_df[0], result.interaction_df[0]],
             'df_den': [result.factor_a_df[1], result.factor_b_df[1], result.interaction_df[1]],
             'p': [result.factor_a_pvalue, result.factor_b_pvalue, result.interaction_pvalue],
-            'partial_η²': [
+            'partial_\u03b7\u00b2': [
                 result.effect_sizes.get(fa_name, np.nan),
                 result.effect_sizes.get(fb_name, np.nan),
-                result.effect_sizes.get(f'{fa_name}×{fb_name}', np.nan),
+                result.effect_sizes.get(f'{fa_name}\u00d7{fb_name}', np.nan),
             ]
         })
-        
+
         return result
-    
+
     def _run_twoway_posthoc(
         self,
         data: pd.DataFrame,
@@ -1296,92 +1346,70 @@ class StatisticalAnalyzer:
     ) -> TwoWayResult:
         """
         Run post-hoc tests for two-way ANOVA.
-        
+
         Strategy depends on interaction significance:
-        - Significant interaction → simple main effects 
-          (compare Factor A levels within each level of Factor B, and vice versa)
-        - No significant interaction → main effect post-hocs 
-          (compare marginal means for each significant factor)
+        - Significant interaction -> simple main effects
+        - No significant interaction -> main effect post-hocs
         """
         pairwise_rows = []
-        
+
         if twoway_result.interaction_significant:
-            # === SIMPLE MAIN EFFECTS ===
             twoway_result.posthoc_type = "simple_main_effects"
-            
+
             # Compare Factor A levels within each level of Factor B
             for b_level in sorted(data[factor_b_col].unique()):
                 subset = data[data[factor_b_col] == b_level]
                 a_levels = sorted(subset[factor_a_col].unique())
-                
                 if len(a_levels) < 2:
                     continue
-                
                 for i in range(len(a_levels)):
                     for j in range(i + 1, len(a_levels)):
                         g1 = subset[subset[factor_a_col] == a_levels[i]][value_col].dropna()
                         g2 = subset[subset[factor_a_col] == a_levels[j]][value_col].dropna()
-                        
                         if len(g1) < 2 or len(g2) < 2:
                             continue
-                        
-                        # Use Mann-Whitney for non-parametric, t-test for parametric
                         if twoway_result.test_type == TestType.ART_ANOVA:
                             stat, p = stats.mannwhitneyu(g1, g2, alternative='two-sided')
                             test_used = 'Mann-Whitney U'
                         else:
                             stat, p = stats.ttest_ind(g1, g2, equal_var=False)
                             test_used = "Welch's t-test"
-                        
                         pairwise_rows.append({
                             'comparison_type': f'{twoway_result.factor_a_name} within {twoway_result.factor_b_name}={b_level}',
-                            'group1': f'{a_levels[i]}',
-                            'group2': f'{a_levels[j]}',
+                            'group1': f'{a_levels[i]}', 'group2': f'{a_levels[j]}',
                             'within_level': str(b_level),
                             'factor_compared': twoway_result.factor_a_name,
-                            'statistic': stat,
-                            'pvalue': p,
-                            'test': test_used,
+                            'statistic': stat, 'pvalue': p, 'test': test_used,
                         })
-            
+
             # Compare Factor B levels within each level of Factor A
             for a_level in sorted(data[factor_a_col].unique()):
                 subset = data[data[factor_a_col] == a_level]
                 b_levels = sorted(subset[factor_b_col].unique())
-                
                 if len(b_levels) < 2:
                     continue
-                
                 for i in range(len(b_levels)):
                     for j in range(i + 1, len(b_levels)):
                         g1 = subset[subset[factor_b_col] == b_levels[i]][value_col].dropna()
                         g2 = subset[subset[factor_b_col] == b_levels[j]][value_col].dropna()
-                        
                         if len(g1) < 2 or len(g2) < 2:
                             continue
-                        
                         if twoway_result.test_type == TestType.ART_ANOVA:
                             stat, p = stats.mannwhitneyu(g1, g2, alternative='two-sided')
                             test_used = 'Mann-Whitney U'
                         else:
                             stat, p = stats.ttest_ind(g1, g2, equal_var=False)
                             test_used = "Welch's t-test"
-                        
                         pairwise_rows.append({
                             'comparison_type': f'{twoway_result.factor_b_name} within {twoway_result.factor_a_name}={a_level}',
-                            'group1': f'{b_levels[i]}',
-                            'group2': f'{b_levels[j]}',
+                            'group1': f'{b_levels[i]}', 'group2': f'{b_levels[j]}',
                             'within_level': str(a_level),
                             'factor_compared': twoway_result.factor_b_name,
-                            'statistic': stat,
-                            'pvalue': p,
-                            'test': test_used,
+                            'statistic': stat, 'pvalue': p, 'test': test_used,
                         })
-        
         else:
-            # === MAIN EFFECT POST-HOCS (marginal means) ===
             twoway_result.posthoc_type = "main_effect_marginal"
-            
+
             # Post-hoc for Factor A if significant
             if twoway_result.factor_a_pvalue < self.alpha:
                 a_levels = sorted(data[factor_a_col].unique())
@@ -1389,28 +1417,22 @@ class StatisticalAnalyzer:
                     for j in range(i + 1, len(a_levels)):
                         g1 = data[data[factor_a_col] == a_levels[i]][value_col].dropna()
                         g2 = data[data[factor_a_col] == a_levels[j]][value_col].dropna()
-                        
                         if len(g1) < 2 or len(g2) < 2:
                             continue
-                        
                         if twoway_result.test_type == TestType.ART_ANOVA:
                             stat, p = stats.mannwhitneyu(g1, g2, alternative='two-sided')
                             test_used = 'Mann-Whitney U'
                         else:
                             stat, p = stats.ttest_ind(g1, g2, equal_var=False)
                             test_used = "Welch's t-test"
-                        
                         pairwise_rows.append({
                             'comparison_type': f'{twoway_result.factor_a_name} (marginal)',
-                            'group1': f'{a_levels[i]}',
-                            'group2': f'{a_levels[j]}',
+                            'group1': f'{a_levels[i]}', 'group2': f'{a_levels[j]}',
                             'within_level': 'all',
                             'factor_compared': twoway_result.factor_a_name,
-                            'statistic': stat,
-                            'pvalue': p,
-                            'test': test_used,
+                            'statistic': stat, 'pvalue': p, 'test': test_used,
                         })
-            
+
             # Post-hoc for Factor B if significant
             if twoway_result.factor_b_pvalue < self.alpha:
                 b_levels = sorted(data[factor_b_col].unique())
@@ -1418,37 +1440,31 @@ class StatisticalAnalyzer:
                     for j in range(i + 1, len(b_levels)):
                         g1 = data[data[factor_b_col] == b_levels[i]][value_col].dropna()
                         g2 = data[data[factor_b_col] == b_levels[j]][value_col].dropna()
-                        
                         if len(g1) < 2 or len(g2) < 2:
                             continue
-                        
                         if twoway_result.test_type == TestType.ART_ANOVA:
                             stat, p = stats.mannwhitneyu(g1, g2, alternative='two-sided')
                             test_used = 'Mann-Whitney U'
                         else:
                             stat, p = stats.ttest_ind(g1, g2, equal_var=False)
                             test_used = "Welch's t-test"
-                        
                         pairwise_rows.append({
                             'comparison_type': f'{twoway_result.factor_b_name} (marginal)',
-                            'group1': f'{b_levels[i]}',
-                            'group2': f'{b_levels[j]}',
+                            'group1': f'{b_levels[i]}', 'group2': f'{b_levels[j]}',
                             'within_level': 'all',
                             'factor_compared': twoway_result.factor_b_name,
-                            'statistic': stat,
-                            'pvalue': p,
-                            'test': test_used,
+                            'statistic': stat, 'pvalue': p, 'test': test_used,
                         })
-        
+
         # Apply multiple comparison correction
         if pairwise_rows:
             posthoc_df = pd.DataFrame(pairwise_rows)
             posthoc_df['pvalue_adj'] = self._adjust_pvalues(posthoc_df['pvalue'].values)
             posthoc_df['significant'] = posthoc_df['pvalue_adj'] < self.alpha
             twoway_result.posthoc_results = posthoc_df
-        
+
         return twoway_result
-    
+
     def _get_twoway_descriptive_stats(
         self,
         data: pd.DataFrame,
@@ -1456,56 +1472,885 @@ class StatisticalAnalyzer:
         factor_a_col: str,
         factor_b_col: str
     ) -> pd.DataFrame:
-        """
-        Calculate descriptive statistics for each cell of the two-way design.
-        
-        Returns a DataFrame with columns: factor_a, factor_b, n, mean, std, sem, median, min, max
-        """
+        """Calculate descriptive statistics for each cell of the two-way design."""
         rows = []
         for (a, b), group_df in data.groupby([factor_a_col, factor_b_col]):
             vals = group_df[value_col].dropna()
             rows.append({
-                'factor_a': a,
-                'factor_b': b,
-                'n': len(vals),
-                'mean': vals.mean(),
-                'std': vals.std(),
+                'factor_a': a, 'factor_b': b, 'n': len(vals),
+                'mean': vals.mean(), 'std': vals.std(),
                 'sem': vals.sem() if len(vals) > 1 else np.nan,
-                'median': vals.median(),
-                'min': vals.min(),
-                'max': vals.max(),
+                'median': vals.median(), 'min': vals.min(), 'max': vals.max(),
             })
-        
-        # Also add marginal means for Factor A
+
+        # Marginal means for Factor A
         for a, group_df in data.groupby(factor_a_col):
             vals = group_df[value_col].dropna()
             rows.append({
-                'factor_a': a,
-                'factor_b': '__MARGINAL__',
-                'n': len(vals),
-                'mean': vals.mean(),
-                'std': vals.std(),
+                'factor_a': a, 'factor_b': '__MARGINAL__', 'n': len(vals),
+                'mean': vals.mean(), 'std': vals.std(),
                 'sem': vals.sem() if len(vals) > 1 else np.nan,
-                'median': vals.median(),
-                'min': vals.min(),
-                'max': vals.max(),
+                'median': vals.median(), 'min': vals.min(), 'max': vals.max(),
             })
-        
+
         # Marginal means for Factor B
         for b, group_df in data.groupby(factor_b_col):
             vals = group_df[value_col].dropna()
             rows.append({
-                'factor_a': '__MARGINAL__',
-                'factor_b': b,
-                'n': len(vals),
-                'mean': vals.mean(),
-                'std': vals.std(),
+                'factor_a': '__MARGINAL__', 'factor_b': b, 'n': len(vals),
+                'mean': vals.mean(), 'std': vals.std(),
                 'sem': vals.sem() if len(vals) > 1 else np.nan,
-                'median': vals.median(),
-                'min': vals.min(),
-                'max': vals.max(),
+                'median': vals.median(), 'min': vals.min(), 'max': vals.max(),
             })
-        
+
+        return pd.DataFrame(rows).round(4)
+
+    # ================================================================
+    # THREE-WAY ANOVA METHODS (fully additive — no changes to two-way)
+    # ================================================================
+
+    def analyze_threeway(
+        self,
+        data: pd.DataFrame,
+        value_col: str,
+        factor_a_col: str,
+        factor_b_col: str,
+        factor_c_col: str,
+        factor_a_name: Optional[str] = None,
+        factor_b_name: Optional[str] = None,
+        factor_c_name: Optional[str] = None
+    ) -> FullThreeWayAnalysisResult:
+        """
+        Perform complete three-way factorial ANOVA analysis.
+
+        Automatically selects between parametric three-way ANOVA and
+        non-parametric ART (Aligned Rank Transform) ANOVA based on
+        assumption checks.
+        """
+        fa_name = factor_a_name or factor_a_col
+        fb_name = factor_b_name or factor_b_col
+        fc_name = factor_c_name or factor_c_col
+
+        # Clean data
+        df = data[[value_col, factor_a_col, factor_b_col, factor_c_col]].dropna().copy()
+        df[value_col] = pd.to_numeric(df[value_col], errors='coerce')
+        df = df.dropna()
+
+        # Ensure factors are categorical strings
+        df[factor_a_col] = df[factor_a_col].astype(str).str.strip()
+        df[factor_b_col] = df[factor_b_col].astype(str).str.strip()
+        df[factor_c_col] = df[factor_c_col].astype(str).str.strip()
+
+        # Skip analysis if data has near-zero variance
+        if df[value_col].std() < 1e-10:
+            skip_result = ThreeWayResult(
+                test_type=TestType.ANOVA_THREEWAY,
+                factor_a_name=fa_name,
+                factor_b_name=fb_name,
+                factor_c_name=fc_name,
+                alpha=self.alpha
+            )
+            descriptives = self._get_threeway_descriptive_stats(
+                df, value_col, factor_a_col, factor_b_col, factor_c_col
+            )
+            return FullThreeWayAnalysisResult(
+                variable_name=value_col,
+                threeway_result=skip_result,
+                descriptive_stats=descriptives,
+                assumption_notes="Skipped: near-zero variance (all values identical, e.g. LOD-replaced)"
+            )
+
+        # Check assumptions and select test
+        use_parametric, assumption_notes = self._recommend_threeway_test(
+            df, value_col, factor_a_col, factor_b_col, factor_c_col
+        )
+
+        # Run the appropriate three-way test
+        if use_parametric:
+            threeway_result = self._run_threeway_parametric(
+                df, value_col, factor_a_col, factor_b_col, factor_c_col,
+                fa_name, fb_name, fc_name
+            )
+        else:
+            threeway_result = self._run_art_anova_threeway(
+                df, value_col, factor_a_col, factor_b_col, factor_c_col,
+                fa_name, fb_name, fc_name
+            )
+
+        # Run post-hoc tests based on interaction significance
+        threeway_result = self._run_threeway_posthoc(
+            df, value_col, factor_a_col, factor_b_col, factor_c_col, threeway_result
+        )
+
+        # Cell descriptive statistics (A x B x C means)
+        descriptives = self._get_threeway_descriptive_stats(
+            df, value_col, factor_a_col, factor_b_col, factor_c_col
+        )
+
+        return FullThreeWayAnalysisResult(
+            variable_name=value_col,
+            threeway_result=threeway_result,
+            descriptive_stats=descriptives,
+            assumption_notes=assumption_notes
+        )
+
+    def _recommend_threeway_test(
+        self,
+        data: pd.DataFrame,
+        value_col: str,
+        factor_a_col: str,
+        factor_b_col: str,
+        factor_c_col: str
+    ) -> Tuple[bool, str]:
+        """Check assumptions for three-way ANOVA and recommend parametric vs ART."""
+        notes = []
+        normality_ok = True
+        homogeneity_ok = True
+
+        # Check normality within each cell (A x B x C combination)
+        cells = data.groupby([factor_a_col, factor_b_col, factor_c_col])
+        group_arrays = []
+
+        for (a, b, c), group_df in cells:
+            values = group_df[value_col].dropna().values
+            group_arrays.append(values)
+
+            if len(values) >= self.min_sample_for_normality:
+                _, p, passed = self.check_normality(values, f"{a}_{b}_{c}")
+                if not passed:
+                    normality_ok = False
+                    notes.append(f"Normality violated in cell ({a}, {b}, {c}), p={p:.4f}")
+            elif len(values) < 3:
+                notes.append(f"Cell ({a}, {b}, {c}) has n={len(values)}, too small for normality test")
+
+        # Check homogeneity of variances across cells
+        valid_groups = [g for g in group_arrays if len(g) >= 2]
+        if len(valid_groups) >= 2:
+            _, homo_p, homo_passed = self.check_homoscedasticity(
+                [np.array(g) for g in valid_groups]
+            )
+            if not homo_passed:
+                homogeneity_ok = False
+                notes.append(f"Homogeneity of variances violated (Levene's p={homo_p:.4f})")
+
+        # Check minimum cell sizes
+        min_cell_n = min(len(g) for g in group_arrays) if group_arrays else 0
+        if min_cell_n < self.MIN_PARAMETRIC_N:
+            notes.append(f"Minimum cell size n={min_cell_n} is below threshold ({self.MIN_PARAMETRIC_N})")
+
+        use_parametric = (
+            normality_ok and
+            homogeneity_ok and
+            min_cell_n >= self.MIN_PARAMETRIC_N
+        )
+
+        if use_parametric:
+            notes.insert(0, "Using parametric three-way ANOVA: assumptions met")
+        else:
+            notes.insert(0, "Using ART ANOVA (non-parametric): one or more assumptions violated")
+
+        return use_parametric, "; ".join(notes)
+
+    def _run_threeway_parametric(
+        self,
+        data: pd.DataFrame,
+        value_col: str,
+        factor_a_col: str,
+        factor_b_col: str,
+        factor_c_col: str,
+        fa_name: str,
+        fb_name: str,
+        fc_name: str
+    ) -> ThreeWayResult:
+        """Run parametric three-way ANOVA using Type II sum of squares."""
+        result = ThreeWayResult(
+            test_type=TestType.ANOVA_THREEWAY,
+            factor_a_name=fa_name,
+            factor_b_name=fb_name,
+            factor_c_name=fc_name,
+            alpha=self.alpha
+        )
+
+        # Classify effect from statsmodels ANOVA index strings (uses sanitized names)
+        def _classify_effect(idx_str):
+            has_a = 'Factor_A' in idx_str
+            has_b = 'Factor_B' in idx_str
+            has_c = 'Factor_C' in idx_str
+            if has_a and not has_b and not has_c:
+                return 'A'
+            elif has_b and not has_a and not has_c:
+                return 'B'
+            elif has_c and not has_a and not has_b:
+                return 'C'
+            elif has_a and has_b and not has_c:
+                return 'AB'
+            elif has_a and has_c and not has_b:
+                return 'AC'
+            elif has_b and has_c and not has_a:
+                return 'BC'
+            elif has_a and has_b and has_c:
+                return 'ABC'
+            return None
+
+        try:
+            import statsmodels.api as sm
+            from statsmodels.formula.api import ols
+            from statsmodels.stats.anova import anova_lm
+
+            # Sanitize column names for formula
+            df = data[[value_col, factor_a_col, factor_b_col, factor_c_col]].copy()
+            safe_val = 'Y_value'
+            safe_a = 'Factor_A'
+            safe_b = 'Factor_B'
+            safe_c = 'Factor_C'
+            df[safe_val] = df[value_col]
+            df[safe_a] = df[factor_a_col]
+            df[safe_b] = df[factor_b_col]
+            df[safe_c] = df[factor_c_col]
+
+            # Fit the full model with all interactions
+            formula = f'{safe_val} ~ C({safe_a}) * C({safe_b}) * C({safe_c})'
+            model = ols(formula, data=df).fit()
+
+            # Type II ANOVA table
+            anova_tbl = anova_lm(model, typ=2)
+
+            ss_residual = anova_tbl.loc['Residual', 'sum_sq']
+            df_residual = anova_tbl.loc['Residual', 'df']
+
+            for idx in anova_tbl.index:
+                if idx in ('Residual', 'Intercept'):
+                    continue
+                idx_str = str(idx)
+                effect = _classify_effect(idx_str)
+                if effect is None:
+                    continue
+
+                f_val = anova_tbl.loc[idx, 'F']
+                p_val = anova_tbl.loc[idx, 'PR(>F)']
+                df_num = anova_tbl.loc[idx, 'df']
+                ss_effect = anova_tbl.loc[idx, 'sum_sq']
+                partial_eta_sq = ss_effect / (ss_effect + ss_residual) if (ss_effect + ss_residual) > 0 else 0
+
+                if effect == 'A':
+                    result.factor_a_stat = f_val
+                    result.factor_a_pvalue = p_val
+                    result.factor_a_df = (df_num, df_residual)
+                    result.effect_sizes[fa_name] = round(partial_eta_sq, 4)
+                elif effect == 'B':
+                    result.factor_b_stat = f_val
+                    result.factor_b_pvalue = p_val
+                    result.factor_b_df = (df_num, df_residual)
+                    result.effect_sizes[fb_name] = round(partial_eta_sq, 4)
+                elif effect == 'C':
+                    result.factor_c_stat = f_val
+                    result.factor_c_pvalue = p_val
+                    result.factor_c_df = (df_num, df_residual)
+                    result.effect_sizes[fc_name] = round(partial_eta_sq, 4)
+                elif effect == 'AB':
+                    result.interaction_ab_stat = f_val
+                    result.interaction_ab_pvalue = p_val
+                    result.interaction_ab_df = (df_num, df_residual)
+                    result.interaction_ab_significant = p_val < self.alpha
+                    result.effect_sizes[f'{fa_name}\u00d7{fb_name}'] = round(partial_eta_sq, 4)
+                elif effect == 'AC':
+                    result.interaction_ac_stat = f_val
+                    result.interaction_ac_pvalue = p_val
+                    result.interaction_ac_df = (df_num, df_residual)
+                    result.interaction_ac_significant = p_val < self.alpha
+                    result.effect_sizes[f'{fa_name}\u00d7{fc_name}'] = round(partial_eta_sq, 4)
+                elif effect == 'BC':
+                    result.interaction_bc_stat = f_val
+                    result.interaction_bc_pvalue = p_val
+                    result.interaction_bc_df = (df_num, df_residual)
+                    result.interaction_bc_significant = p_val < self.alpha
+                    result.effect_sizes[f'{fb_name}\u00d7{fc_name}'] = round(partial_eta_sq, 4)
+                elif effect == 'ABC':
+                    result.interaction_abc_stat = f_val
+                    result.interaction_abc_pvalue = p_val
+                    result.interaction_abc_df = (df_num, df_residual)
+                    result.interaction_abc_significant = p_val < self.alpha
+                    result.effect_sizes[f'{fa_name}\u00d7{fb_name}\u00d7{fc_name}'] = round(partial_eta_sq, 4)
+
+            # Build clean ANOVA table for reporting
+            sources = [
+                fa_name, fb_name, fc_name,
+                f'{fa_name}\u00d7{fb_name}', f'{fa_name}\u00d7{fc_name}', f'{fb_name}\u00d7{fc_name}',
+                f'{fa_name}\u00d7{fb_name}\u00d7{fc_name}', 'Residual'
+            ]
+            n_rows = len(sources)
+            clean_tbl = pd.DataFrame({
+                'Source': sources,
+                'SS': [np.nan]*n_rows, 'df': [np.nan]*n_rows, 'MS': [np.nan]*n_rows,
+                'F': [np.nan]*n_rows, 'p': [np.nan]*n_rows, 'partial_\u03b7\u00b2': [np.nan]*n_rows,
+            })
+
+            # Map clean table rows to statsmodels ANOVA table rows
+            effect_order = ['A', 'B', 'C', 'AB', 'AC', 'BC', 'ABC']
+            row_map = {}
+            for idx in anova_tbl.index:
+                idx_str = str(idx)
+                if idx_str == 'Residual':
+                    row_map[n_rows - 1] = idx
+                else:
+                    effect = _classify_effect(idx_str)
+                    if effect and effect in effect_order:
+                        row_map[effect_order.index(effect)] = idx
+
+            for clean_row, sm_idx in row_map.items():
+                clean_tbl.loc[clean_row, 'SS'] = round(anova_tbl.loc[sm_idx, 'sum_sq'], 4)
+                clean_tbl.loc[clean_row, 'df'] = int(anova_tbl.loc[sm_idx, 'df'])
+                ms = anova_tbl.loc[sm_idx, 'sum_sq'] / anova_tbl.loc[sm_idx, 'df'] if anova_tbl.loc[sm_idx, 'df'] > 0 else np.nan
+                clean_tbl.loc[clean_row, 'MS'] = round(ms, 4)
+                if 'F' in anova_tbl.columns and sm_idx != 'Residual':
+                    clean_tbl.loc[clean_row, 'F'] = round(anova_tbl.loc[sm_idx, 'F'], 4)
+                    clean_tbl.loc[clean_row, 'p'] = anova_tbl.loc[sm_idx, 'PR(>F)']
+                if clean_row < n_rows - 1:
+                    source_name = clean_tbl.loc[clean_row, 'Source']
+                    clean_tbl.loc[clean_row, 'partial_\u03b7\u00b2'] = result.effect_sizes.get(source_name, np.nan)
+
+            result.anova_table = clean_tbl
+
+        except ImportError:
+            warnings.warn("statsmodels not available; falling back to ART ANOVA")
+            return self._run_art_anova_threeway(data, value_col, factor_a_col, factor_b_col, factor_c_col, fa_name, fb_name, fc_name)
+        except Exception as e:
+            # Try Type III SS before falling back to ART (handles unbalanced designs better)
+            try:
+                import statsmodels.api as sm
+                from statsmodels.formula.api import ols
+                from statsmodels.stats.anova import anova_lm
+
+                df = data.copy()
+                safe_val, safe_a, safe_b, safe_c = 'Y_value', 'Factor_A', 'Factor_B', 'Factor_C'
+                df[safe_val] = df[value_col]
+                df[safe_a] = df[factor_a_col]
+                df[safe_b] = df[factor_b_col]
+                df[safe_c] = df[factor_c_col]
+
+                formula = f'{safe_val} ~ C({safe_a}) * C({safe_b}) * C({safe_c})'
+                model = ols(formula, data=df).fit()
+                anova_tbl = anova_lm(model, typ=3)
+
+                ss_residual = anova_tbl.loc['Residual', 'sum_sq']
+                df_residual = anova_tbl.loc['Residual', 'df']
+
+                for idx in anova_tbl.index:
+                    if idx in ('Residual', 'Intercept'):
+                        continue
+                    idx_str = str(idx)
+                    effect = _classify_effect(idx_str)
+                    if effect is None:
+                        continue
+
+                    f_val = anova_tbl.loc[idx, 'F']
+                    p_val = anova_tbl.loc[idx, 'PR(>F)']
+                    df_num = anova_tbl.loc[idx, 'df']
+                    ss_effect = anova_tbl.loc[idx, 'sum_sq']
+                    partial_eta_sq = ss_effect / (ss_effect + ss_residual) if (ss_effect + ss_residual) > 0 else 0
+
+                    effect_labels = {
+                        'A': fa_name, 'B': fb_name, 'C': fc_name,
+                        'AB': f'{fa_name}\u00d7{fb_name}',
+                        'AC': f'{fa_name}\u00d7{fc_name}',
+                        'BC': f'{fb_name}\u00d7{fc_name}',
+                        'ABC': f'{fa_name}\u00d7{fb_name}\u00d7{fc_name}',
+                    }
+                    label = effect_labels.get(effect, effect)
+                    result.effect_sizes[label] = round(partial_eta_sq, 4)
+                    self._set_threeway_effect(result, effect, f_val, p_val,
+                                              (df_num, df_residual), label)
+
+                warnings.warn(f"Type II ANOVA failed ({e}); used Type III SS instead")
+            except Exception as e2:
+                warnings.warn(f"Parametric three-way ANOVA failed (Type II: {e}, Type III: {e2}); falling back to ART ANOVA")
+                return self._run_art_anova_threeway(data, value_col, factor_a_col, factor_b_col, factor_c_col, fa_name, fb_name, fc_name)
+
+        return result
+
+    def _run_art_anova_threeway(
+        self,
+        data: pd.DataFrame,
+        value_col: str,
+        factor_a_col: str,
+        factor_b_col: str,
+        factor_c_col: str,
+        fa_name: str,
+        fb_name: str,
+        fc_name: str
+    ) -> ThreeWayResult:
+        """
+        Aligned Rank Transform (ART) ANOVA — non-parametric three-way test.
+
+        ART procedure extended to 3 factors (Wobbrock et al., 2011):
+        For each of 7 effects, strip all OTHER effects, rank, then ANOVA on ranks.
+        """
+        result = ThreeWayResult(
+            test_type=TestType.ART_ANOVA_THREEWAY,
+            factor_a_name=fa_name,
+            factor_b_name=fb_name,
+            factor_c_name=fc_name,
+            alpha=self.alpha
+        )
+
+        df = data[[value_col, factor_a_col, factor_b_col, factor_c_col]].copy()
+        Y = df[value_col].values.astype(float)
+        n = len(Y)
+
+        levels_a = sorted(df[factor_a_col].unique())
+        levels_b = sorted(df[factor_b_col].unique())
+        levels_c = sorted(df[factor_c_col].unique())
+
+        from scipy.stats import rankdata
+
+        # Compute all marginal means
+        grand_mean = np.mean(Y)
+
+        # 1-way marginals
+        marg_a = {a: np.mean(Y[df[factor_a_col] == a]) for a in levels_a}
+        marg_b = {b: np.mean(Y[df[factor_b_col] == b]) for b in levels_b}
+        marg_c = {c: np.mean(Y[df[factor_c_col] == c]) for c in levels_c}
+
+        # 2-way marginals
+        marg_ab = {}
+        for a in levels_a:
+            for b in levels_b:
+                mask = (df[factor_a_col] == a) & (df[factor_b_col] == b)
+                vals = Y[mask]
+                marg_ab[(a, b)] = np.mean(vals) if len(vals) > 0 else grand_mean
+
+        marg_ac = {}
+        for a in levels_a:
+            for c in levels_c:
+                mask = (df[factor_a_col] == a) & (df[factor_c_col] == c)
+                vals = Y[mask]
+                marg_ac[(a, c)] = np.mean(vals) if len(vals) > 0 else grand_mean
+
+        marg_bc = {}
+        for b in levels_b:
+            for c in levels_c:
+                mask = (df[factor_b_col] == b) & (df[factor_c_col] == c)
+                vals = Y[mask]
+                marg_bc[(b, c)] = np.mean(vals) if len(vals) > 0 else grand_mean
+
+        # 3-way cell means
+        cell_abc = {}
+        for a in levels_a:
+            for b in levels_b:
+                for c in levels_c:
+                    mask = (df[factor_a_col] == a) & (df[factor_b_col] == b) & (df[factor_c_col] == c)
+                    vals = Y[mask]
+                    cell_abc[(a, b, c)] = np.mean(vals) if len(vals) > 0 else grand_mean
+
+        # Helper: decompose cell mean into effects
+        # cell_abc = mu + alpha_a + beta_b + gamma_c + (ab)_ij + (ac)_ik + (bc)_jk + (abc)_ijk
+        # where alpha_a = marg_a[a] - mu, etc.
+        # (ab)_ij = marg_ab[a,b] - marg_a[a] - marg_b[b] + mu
+        # (ac)_ik = marg_ac[a,c] - marg_a[a] - marg_c[c] + mu
+        # (bc)_jk = marg_bc[b,c] - marg_b[b] - marg_c[c] + mu
+        # (abc)_ijk = cell_abc - marg_ab - marg_ac - marg_bc + marg_a + marg_b + marg_c - mu
+
+        # For ART, aligned value for effect X = Y_i - (all effects except X)
+        # We compute alignment for each of the 7 effects using the full model on ranks.
+
+        def _art_for_effect(effect_name):
+            """Align for a given effect, rank, then extract F/p from full model."""
+            aligned = np.zeros(n)
+            for i in range(n):
+                a_i = df.iloc[i][factor_a_col]
+                b_i = df.iloc[i][factor_b_col]
+                c_i = df.iloc[i][factor_c_col]
+
+                # Effects to subtract (everything except the target effect)
+                eff_a = marg_a[a_i] - grand_mean
+                eff_b = marg_b[b_i] - grand_mean
+                eff_c = marg_c[c_i] - grand_mean
+                eff_ab = marg_ab[(a_i, b_i)] - marg_a[a_i] - marg_b[b_i] + grand_mean
+                eff_ac = marg_ac[(a_i, c_i)] - marg_a[a_i] - marg_c[c_i] + grand_mean
+                eff_bc = marg_bc[(b_i, c_i)] - marg_b[b_i] - marg_c[c_i] + grand_mean
+                eff_abc = (cell_abc[(a_i, b_i, c_i)] - marg_ab[(a_i, b_i)] - marg_ac[(a_i, c_i)]
+                           - marg_bc[(b_i, c_i)] + marg_a[a_i] + marg_b[b_i] + marg_c[c_i] - grand_mean)
+
+                # Subtract all effects EXCEPT the target
+                subtract = 0
+                if effect_name != 'A':
+                    subtract += eff_a
+                if effect_name != 'B':
+                    subtract += eff_b
+                if effect_name != 'C':
+                    subtract += eff_c
+                if effect_name != 'AB':
+                    subtract += eff_ab
+                if effect_name != 'AC':
+                    subtract += eff_ac
+                if effect_name != 'BC':
+                    subtract += eff_bc
+                if effect_name != 'ABC':
+                    subtract += eff_abc
+
+                aligned[i] = Y[i] - subtract
+
+            ranks = rankdata(aligned)
+
+            # Fit full model on ranks to extract the target effect
+            try:
+                import statsmodels.api as sm
+                from statsmodels.formula.api import ols as sm_ols
+                from statsmodels.stats.anova import anova_lm as sm_anova_lm
+
+                # Use safe column names to avoid conflict with patsy's C() function
+                art_df = pd.DataFrame({
+                    'ranked': ranks,
+                    'FA': df[factor_a_col].values,
+                    'FB': df[factor_b_col].values,
+                    'FC': df[factor_c_col].values,
+                })
+                model = sm_ols('ranked ~ C(FA) * C(FB) * C(FC)', data=art_df).fit()
+
+                # Try Type II first, fall back to Type III for unbalanced designs
+                try:
+                    art_table = sm_anova_lm(model, typ=2)
+                except Exception:
+                    art_table = sm_anova_lm(model, typ=3)
+
+                # Find the row matching the target effect
+                for idx in art_table.index:
+                    idx_str = str(idx)
+                    if idx_str == 'Residual' or idx_str == 'Intercept':
+                        continue
+                    has_fa = 'C(FA)' in idx_str
+                    has_fb = 'C(FB)' in idx_str
+                    has_fc = 'C(FC)' in idx_str
+
+                    eff = None
+                    if has_fa and not has_fb and not has_fc:
+                        eff = 'A'
+                    elif has_fb and not has_fa and not has_fc:
+                        eff = 'B'
+                    elif has_fc and not has_fa and not has_fb:
+                        eff = 'C'
+                    elif has_fa and has_fb and not has_fc:
+                        eff = 'AB'
+                    elif has_fa and has_fc and not has_fb:
+                        eff = 'AC'
+                    elif has_fb and has_fc and not has_fa:
+                        eff = 'BC'
+                    elif has_fa and has_fb and has_fc:
+                        eff = 'ABC'
+
+                    if eff == effect_name:
+                        return (art_table.loc[idx, 'F'],
+                                art_table.loc[idx, 'PR(>F)'],
+                                (int(art_table.loc[idx, 'df']), int(art_table.loc['Residual', 'df'])))
+
+            except ImportError:
+                pass
+            except Exception as e:
+                warnings.warn(f"ART ANOVA failed for effect '{effect_name}': {e}")
+
+            # Fallback: one-way F on ranks grouped by the target factor(s)
+            try:
+                if effect_name == 'A':
+                    groups = [ranks[df[factor_a_col] == a] for a in levels_a]
+                elif effect_name == 'B':
+                    groups = [ranks[df[factor_b_col] == b] for b in levels_b]
+                elif effect_name == 'C':
+                    groups = [ranks[df[factor_c_col] == c] for c in levels_c]
+                elif effect_name == 'AB':
+                    groups = [ranks[(df[factor_a_col] == a) & (df[factor_b_col] == b)]
+                              for a in levels_a for b in levels_b]
+                elif effect_name == 'AC':
+                    groups = [ranks[(df[factor_a_col] == a) & (df[factor_c_col] == c)]
+                              for a in levels_a for c in levels_c]
+                elif effect_name == 'BC':
+                    groups = [ranks[(df[factor_b_col] == b) & (df[factor_c_col] == c)]
+                              for b in levels_b for c in levels_c]
+                elif effect_name == 'ABC':
+                    groups = [ranks[(df[factor_a_col] == a) & (df[factor_b_col] == b) & (df[factor_c_col] == c)]
+                              for a in levels_a for b in levels_b for c in levels_c]
+                else:
+                    return (np.nan, np.nan, (0, 0))
+
+                groups = [g for g in groups if len(g) > 0]
+                if len(groups) >= 2 and all(len(g) > 0 for g in groups):
+                    f_val, p_val = stats.f_oneway(*groups)
+                    return (f_val, p_val, (len(groups) - 1, n - len(groups)))
+            except Exception:
+                pass
+
+            return (np.nan, np.nan, (0, 0))
+
+        # Run ART for each of the 7 effects
+        for effect_name, setter in [
+            ('A', lambda f, p, d: self._set_threeway_effect(result, 'A', f, p, d, fa_name)),
+            ('B', lambda f, p, d: self._set_threeway_effect(result, 'B', f, p, d, fb_name)),
+            ('C', lambda f, p, d: self._set_threeway_effect(result, 'C', f, p, d, fc_name)),
+            ('AB', lambda f, p, d: self._set_threeway_effect(result, 'AB', f, p, d, f'{fa_name}\u00d7{fb_name}')),
+            ('AC', lambda f, p, d: self._set_threeway_effect(result, 'AC', f, p, d, f'{fa_name}\u00d7{fc_name}')),
+            ('BC', lambda f, p, d: self._set_threeway_effect(result, 'BC', f, p, d, f'{fb_name}\u00d7{fc_name}')),
+            ('ABC', lambda f, p, d: self._set_threeway_effect(result, 'ABC', f, p, d, f'{fa_name}\u00d7{fb_name}\u00d7{fc_name}')),
+        ]:
+            f_val, p_val, df_tup = _art_for_effect(effect_name)
+            setter(f_val, p_val, df_tup)
+
+        # Build ANOVA table
+        sources = [
+            fa_name, fb_name, fc_name,
+            f'{fa_name}\u00d7{fb_name}', f'{fa_name}\u00d7{fc_name}', f'{fb_name}\u00d7{fc_name}',
+            f'{fa_name}\u00d7{fb_name}\u00d7{fc_name}'
+        ]
+        f_vals = [result.factor_a_stat, result.factor_b_stat, result.factor_c_stat,
+                  result.interaction_ab_stat, result.interaction_ac_stat, result.interaction_bc_stat,
+                  result.interaction_abc_stat]
+        p_vals = [result.factor_a_pvalue, result.factor_b_pvalue, result.factor_c_pvalue,
+                  result.interaction_ab_pvalue, result.interaction_ac_pvalue, result.interaction_bc_pvalue,
+                  result.interaction_abc_pvalue]
+        df_nums = [result.factor_a_df[0], result.factor_b_df[0], result.factor_c_df[0],
+                   result.interaction_ab_df[0], result.interaction_ac_df[0], result.interaction_bc_df[0],
+                   result.interaction_abc_df[0]]
+        df_dens = [result.factor_a_df[1], result.factor_b_df[1], result.factor_c_df[1],
+                   result.interaction_ab_df[1], result.interaction_ac_df[1], result.interaction_bc_df[1],
+                   result.interaction_abc_df[1]]
+        etas = [result.effect_sizes.get(s, np.nan) for s in sources]
+
+        result.anova_table = pd.DataFrame({
+            'Source': sources,
+            'F': f_vals, 'df_num': df_nums, 'df_den': df_dens,
+            'p': p_vals, 'partial_\u03b7\u00b2': etas,
+        })
+
+        return result
+
+    @staticmethod
+    def _set_threeway_effect(result: 'ThreeWayResult', effect: str,
+                              f_val: float, p_val: float, df_tup: Tuple,
+                              effect_label: str):
+        """Helper to set the correct fields on a ThreeWayResult for a given effect."""
+        alpha = result.alpha
+
+        # Approximate partial eta-squared from F and df
+        denom = f_val * df_tup[0] + df_tup[1] if df_tup[1] > 0 else 0
+        if not np.isnan(f_val) and np.isfinite(f_val) and denom > 0:
+            eta = max(0, (f_val * df_tup[0]) / denom)
+            result.effect_sizes[effect_label] = round(eta, 4)
+
+        if effect == 'A':
+            result.factor_a_stat, result.factor_a_pvalue, result.factor_a_df = f_val, p_val, df_tup
+        elif effect == 'B':
+            result.factor_b_stat, result.factor_b_pvalue, result.factor_b_df = f_val, p_val, df_tup
+        elif effect == 'C':
+            result.factor_c_stat, result.factor_c_pvalue, result.factor_c_df = f_val, p_val, df_tup
+        elif effect == 'AB':
+            result.interaction_ab_stat, result.interaction_ab_pvalue, result.interaction_ab_df = f_val, p_val, df_tup
+            result.interaction_ab_significant = p_val < alpha if not np.isnan(p_val) else False
+        elif effect == 'AC':
+            result.interaction_ac_stat, result.interaction_ac_pvalue, result.interaction_ac_df = f_val, p_val, df_tup
+            result.interaction_ac_significant = p_val < alpha if not np.isnan(p_val) else False
+        elif effect == 'BC':
+            result.interaction_bc_stat, result.interaction_bc_pvalue, result.interaction_bc_df = f_val, p_val, df_tup
+            result.interaction_bc_significant = p_val < alpha if not np.isnan(p_val) else False
+        elif effect == 'ABC':
+            result.interaction_abc_stat, result.interaction_abc_pvalue, result.interaction_abc_df = f_val, p_val, df_tup
+            result.interaction_abc_significant = p_val < alpha if not np.isnan(p_val) else False
+
+    def _run_threeway_posthoc(
+        self,
+        data: pd.DataFrame,
+        value_col: str,
+        factor_a_col: str,
+        factor_b_col: str,
+        factor_c_col: str,
+        threeway_result: ThreeWayResult
+    ) -> ThreeWayResult:
+        """
+        Run post-hoc tests for three-way ANOVA.
+
+        Strategy:
+        - If 3-way interaction is significant: simple effects within each B×C cell
+        - Elif any 2-way interaction is significant: simple effects for those interactions
+        - Else: marginal pairwise comparisons for significant main effects
+        """
+        pairwise_rows = []
+        tw = threeway_result
+        is_nonparam = tw.test_type == TestType.ART_ANOVA_THREEWAY
+
+        def _pairwise(subset, factor_col, factor_name, context_label, within_level):
+            """Run pairwise comparisons for levels of one factor within a subset."""
+            levels = sorted(subset[factor_col].unique())
+            if len(levels) < 2:
+                return
+            for i in range(len(levels)):
+                for j in range(i + 1, len(levels)):
+                    g1 = subset[subset[factor_col] == levels[i]][value_col].dropna()
+                    g2 = subset[subset[factor_col] == levels[j]][value_col].dropna()
+                    if len(g1) < 2 or len(g2) < 2:
+                        continue
+                    if is_nonparam:
+                        stat, p = stats.mannwhitneyu(g1, g2, alternative='two-sided')
+                        test_used = 'Mann-Whitney U'
+                    else:
+                        stat, p = stats.ttest_ind(g1, g2, equal_var=False)
+                        test_used = "Welch's t-test"
+                    pairwise_rows.append({
+                        'comparison_type': context_label,
+                        'group1': str(levels[i]), 'group2': str(levels[j]),
+                        'within_level': within_level,
+                        'factor_compared': factor_name,
+                        'statistic': stat, 'pvalue': p, 'test': test_used,
+                    })
+
+        any_interaction_sig = (tw.interaction_abc_significant or
+                               tw.interaction_ab_significant or
+                               tw.interaction_ac_significant or
+                               tw.interaction_bc_significant)
+
+        if tw.interaction_abc_significant:
+            # Three-way interaction: compare each factor within each combination of the other two
+            tw.posthoc_type = "simple_effects"
+            for b_level in sorted(data[factor_b_col].unique()):
+                for c_level in sorted(data[factor_c_col].unique()):
+                    subset = data[(data[factor_b_col] == b_level) & (data[factor_c_col] == c_level)]
+                    _pairwise(subset, factor_a_col, tw.factor_a_name,
+                              f'{tw.factor_a_name} within {tw.factor_b_name}={b_level}, {tw.factor_c_name}={c_level}',
+                              f'{b_level}, {c_level}')
+            for a_level in sorted(data[factor_a_col].unique()):
+                for c_level in sorted(data[factor_c_col].unique()):
+                    subset = data[(data[factor_a_col] == a_level) & (data[factor_c_col] == c_level)]
+                    _pairwise(subset, factor_b_col, tw.factor_b_name,
+                              f'{tw.factor_b_name} within {tw.factor_a_name}={a_level}, {tw.factor_c_name}={c_level}',
+                              f'{a_level}, {c_level}')
+            for a_level in sorted(data[factor_a_col].unique()):
+                for b_level in sorted(data[factor_b_col].unique()):
+                    subset = data[(data[factor_a_col] == a_level) & (data[factor_b_col] == b_level)]
+                    _pairwise(subset, factor_c_col, tw.factor_c_name,
+                              f'{tw.factor_c_name} within {tw.factor_a_name}={a_level}, {tw.factor_b_name}={b_level}',
+                              f'{a_level}, {b_level}')
+
+        elif any_interaction_sig:
+            # Two-way interactions: simple effects for significant interactions only
+            tw.posthoc_type = "simple_effects"
+            if tw.interaction_ab_significant:
+                for b_level in sorted(data[factor_b_col].unique()):
+                    subset = data[data[factor_b_col] == b_level]
+                    _pairwise(subset, factor_a_col, tw.factor_a_name,
+                              f'{tw.factor_a_name} within {tw.factor_b_name}={b_level}', str(b_level))
+                for a_level in sorted(data[factor_a_col].unique()):
+                    subset = data[data[factor_a_col] == a_level]
+                    _pairwise(subset, factor_b_col, tw.factor_b_name,
+                              f'{tw.factor_b_name} within {tw.factor_a_name}={a_level}', str(a_level))
+            if tw.interaction_ac_significant:
+                for c_level in sorted(data[factor_c_col].unique()):
+                    subset = data[data[factor_c_col] == c_level]
+                    _pairwise(subset, factor_a_col, tw.factor_a_name,
+                              f'{tw.factor_a_name} within {tw.factor_c_name}={c_level}', str(c_level))
+                for a_level in sorted(data[factor_a_col].unique()):
+                    subset = data[data[factor_a_col] == a_level]
+                    _pairwise(subset, factor_c_col, tw.factor_c_name,
+                              f'{tw.factor_c_name} within {tw.factor_a_name}={a_level}', str(a_level))
+            if tw.interaction_bc_significant:
+                for c_level in sorted(data[factor_c_col].unique()):
+                    subset = data[data[factor_c_col] == c_level]
+                    _pairwise(subset, factor_b_col, tw.factor_b_name,
+                              f'{tw.factor_b_name} within {tw.factor_c_name}={c_level}', str(c_level))
+                for b_level in sorted(data[factor_b_col].unique()):
+                    subset = data[data[factor_b_col] == b_level]
+                    _pairwise(subset, factor_c_col, tw.factor_c_name,
+                              f'{tw.factor_c_name} within {tw.factor_b_name}={b_level}', str(b_level))
+        else:
+            # No interactions significant: marginal post-hocs for significant main effects
+            tw.posthoc_type = "main_effect_marginal"
+            if tw.factor_a_pvalue < self.alpha:
+                _pairwise(data, factor_a_col, tw.factor_a_name,
+                          f'{tw.factor_a_name} (marginal)', 'all')
+            if tw.factor_b_pvalue < self.alpha:
+                _pairwise(data, factor_b_col, tw.factor_b_name,
+                          f'{tw.factor_b_name} (marginal)', 'all')
+            if tw.factor_c_pvalue < self.alpha:
+                _pairwise(data, factor_c_col, tw.factor_c_name,
+                          f'{tw.factor_c_name} (marginal)', 'all')
+
+        # Apply multiple comparison correction
+        if pairwise_rows:
+            posthoc_df = pd.DataFrame(pairwise_rows)
+            posthoc_df['pvalue_adj'] = self._adjust_pvalues(posthoc_df['pvalue'].values)
+            posthoc_df['significant'] = posthoc_df['pvalue_adj'] < self.alpha
+            tw.posthoc_results = posthoc_df
+
+        return tw
+
+    def _get_threeway_descriptive_stats(
+        self,
+        data: pd.DataFrame,
+        value_col: str,
+        factor_a_col: str,
+        factor_b_col: str,
+        factor_c_col: str
+    ) -> pd.DataFrame:
+        """Calculate descriptive statistics for each cell of the three-way design."""
+        rows = []
+
+        # Cell means (A x B x C)
+        for (a, b, c), group_df in data.groupby([factor_a_col, factor_b_col, factor_c_col]):
+            vals = group_df[value_col].dropna()
+            rows.append({
+                'factor_a': a, 'factor_b': b, 'factor_c': c, 'n': len(vals),
+                'mean': vals.mean(), 'std': vals.std(),
+                'sem': vals.sem() if len(vals) > 1 else np.nan,
+                'median': vals.median(), 'min': vals.min(), 'max': vals.max(),
+            })
+
+        # Marginal means for each individual factor
+        for a, group_df in data.groupby(factor_a_col):
+            vals = group_df[value_col].dropna()
+            rows.append({
+                'factor_a': a, 'factor_b': '__MARGINAL__', 'factor_c': '__MARGINAL__', 'n': len(vals),
+                'mean': vals.mean(), 'std': vals.std(),
+                'sem': vals.sem() if len(vals) > 1 else np.nan,
+                'median': vals.median(), 'min': vals.min(), 'max': vals.max(),
+            })
+        for b, group_df in data.groupby(factor_b_col):
+            vals = group_df[value_col].dropna()
+            rows.append({
+                'factor_a': '__MARGINAL__', 'factor_b': b, 'factor_c': '__MARGINAL__', 'n': len(vals),
+                'mean': vals.mean(), 'std': vals.std(),
+                'sem': vals.sem() if len(vals) > 1 else np.nan,
+                'median': vals.median(), 'min': vals.min(), 'max': vals.max(),
+            })
+        for c, group_df in data.groupby(factor_c_col):
+            vals = group_df[value_col].dropna()
+            rows.append({
+                'factor_a': '__MARGINAL__', 'factor_b': '__MARGINAL__', 'factor_c': c, 'n': len(vals),
+                'mean': vals.mean(), 'std': vals.std(),
+                'sem': vals.sem() if len(vals) > 1 else np.nan,
+                'median': vals.median(), 'min': vals.min(), 'max': vals.max(),
+            })
+
+        # 2-way marginal means (A x B, A x C, B x C)
+        for (a, b), group_df in data.groupby([factor_a_col, factor_b_col]):
+            vals = group_df[value_col].dropna()
+            rows.append({
+                'factor_a': a, 'factor_b': b, 'factor_c': '__MARGINAL__', 'n': len(vals),
+                'mean': vals.mean(), 'std': vals.std(),
+                'sem': vals.sem() if len(vals) > 1 else np.nan,
+                'median': vals.median(), 'min': vals.min(), 'max': vals.max(),
+            })
+        for (a, c), group_df in data.groupby([factor_a_col, factor_c_col]):
+            vals = group_df[value_col].dropna()
+            rows.append({
+                'factor_a': a, 'factor_b': '__MARGINAL__', 'factor_c': c, 'n': len(vals),
+                'mean': vals.mean(), 'std': vals.std(),
+                'sem': vals.sem() if len(vals) > 1 else np.nan,
+                'median': vals.median(), 'min': vals.min(), 'max': vals.max(),
+            })
+        for (b, c), group_df in data.groupby([factor_b_col, factor_c_col]):
+            vals = group_df[value_col].dropna()
+            rows.append({
+                'factor_a': '__MARGINAL__', 'factor_b': b, 'factor_c': c, 'n': len(vals),
+                'mean': vals.mean(), 'std': vals.std(),
+                'sem': vals.sem() if len(vals) > 1 else np.nan,
+                'median': vals.median(), 'min': vals.min(), 'max': vals.max(),
+            })
+
         return pd.DataFrame(rows).round(4)
 
 
@@ -1560,41 +2405,41 @@ def format_analysis_report(result: FullAnalysisResult) -> str:
 def format_twoway_apa(result: FullTwoWayAnalysisResult) -> str:
     """
     Generate APA-formatted text for two-way ANOVA results.
-    
+
     Example output:
-    "A two-way ANOVA revealed a significant main effect of Age, 
+    "A two-way ANOVA revealed a significant main effect of Age,
     F(1,36) = 12.4, p = .001, partial η² = .26, ..."
     """
     tw = result.twoway_result
     test_name = "two-way ANOVA" if tw.test_type == TestType.ANOVA_TWOWAY else "ART ANOVA"
-    
+
     parts = [f"A {test_name} was conducted to examine the effects of "
              f"{tw.factor_a_name} and {tw.factor_b_name} on {result.variable_name}."]
-    
+
     def _format_effect(name, f_val, p_val, df_tup, eta):
         """Format a single effect in APA style."""
         if np.isnan(f_val):
             return f"The effect of {name} could not be computed."
-        
+
         sig = "significant" if p_val < tw.alpha else "not significant"
         p_str = f"p < .001" if p_val < 0.001 else f"p = {p_val:.3f}"
         eta_str = f", partial η² = {eta:.2f}" if eta and not np.isnan(eta) else ""
-        
+
         df1 = int(df_tup[0]) if not np.isnan(df_tup[0]) else '?'
         df2 = int(df_tup[1]) if not np.isnan(df_tup[1]) else '?'
-        
+
         return (f"The main effect of {name} was {sig}, "
                 f"F({df1},{df2}) = {f_val:.2f}, {p_str}{eta_str}.")
-    
+
     # Main effects
     eta_a = tw.effect_sizes.get(tw.factor_a_name, np.nan)
-    parts.append(_format_effect(tw.factor_a_name, tw.factor_a_stat, 
+    parts.append(_format_effect(tw.factor_a_name, tw.factor_a_stat,
                                 tw.factor_a_pvalue, tw.factor_a_df, eta_a))
-    
+
     eta_b = tw.effect_sizes.get(tw.factor_b_name, np.nan)
     parts.append(_format_effect(tw.factor_b_name, tw.factor_b_stat,
                                 tw.factor_b_pvalue, tw.factor_b_df, eta_b))
-    
+
     # Interaction
     eta_int = tw.effect_sizes.get(f'{tw.factor_a_name}×{tw.factor_b_name}', np.nan)
     int_sig = "significant" if tw.interaction_significant else "not significant"
@@ -1602,12 +2447,12 @@ def format_twoway_apa(result: FullTwoWayAnalysisResult) -> str:
     int_eta = f", partial η² = {eta_int:.2f}" if eta_int and not np.isnan(eta_int) else ""
     df1_int = int(tw.interaction_df[0]) if not np.isnan(tw.interaction_df[0]) else '?'
     df2_int = int(tw.interaction_df[1]) if not np.isnan(tw.interaction_df[1]) else '?'
-    
+
     parts.append(
         f"The {tw.factor_a_name} × {tw.factor_b_name} interaction was {int_sig}, "
         f"F({df1_int},{df2_int}) = {tw.interaction_stat:.2f}, {int_p}{int_eta}."
     )
-    
+
     # Post-hoc summary
     if tw.posthoc_results is not None and len(tw.posthoc_results) > 0:
         sig_comparisons = tw.posthoc_results[tw.posthoc_results['significant']]
@@ -1619,60 +2464,88 @@ def format_twoway_apa(result: FullTwoWayAnalysisResult) -> str:
                 parts.append(f"Post-hoc pairwise comparisons on marginal means revealed "
                            f"{len(sig_comparisons)} significant difference(s) "
                            f"(corrected for multiple comparisons).")
-    
+
     return " ".join(parts)
 
 
-def format_twoway_report(result: FullTwoWayAnalysisResult) -> str:
-    """Generate a detailed human-readable report for two-way ANOVA results."""
-    lines = []
-    tw = result.twoway_result
-    
-    lines.append(f"{'='*60}")
-    lines.append(f"TWO-WAY ANOVA: {result.variable_name}")
-    lines.append(f"{'='*60}")
-    lines.append(f"Test: {tw.test_type.value}")
-    lines.append(f"Factors: {tw.factor_a_name} × {tw.factor_b_name}")
-    
-    if result.assumption_notes:
-        lines.append(f"\n--- ASSUMPTIONS ---")
-        lines.append(result.assumption_notes)
-    
-    lines.append(f"\n--- ANOVA TABLE ---")
-    if tw.anova_table is not None:
-        lines.append(tw.anova_table.to_string(index=False))
-    
-    lines.append(f"\n--- SIGNIFICANCE SUMMARY ---")
-    def _sig_stars(p):
-        if p < 0.001: return '***'
-        if p < 0.01: return '**'
-        if p < 0.05: return '*'
-        return 'n.s.'
-    
-    lines.append(f"  {tw.factor_a_name}: p={tw.factor_a_pvalue:.4f} {_sig_stars(tw.factor_a_pvalue)}")
-    lines.append(f"  {tw.factor_b_name}: p={tw.factor_b_pvalue:.4f} {_sig_stars(tw.factor_b_pvalue)}")
-    lines.append(f"  {tw.factor_a_name}×{tw.factor_b_name}: p={tw.interaction_pvalue:.4f} {_sig_stars(tw.interaction_pvalue)}")
-    
-    if result.descriptive_stats is not None:
-        cell_stats = result.descriptive_stats[result.descriptive_stats['factor_b'] != '__MARGINAL__']
-        cell_stats = cell_stats[cell_stats['factor_a'] != '__MARGINAL__']
-        lines.append(f"\n--- CELL DESCRIPTIVE STATISTICS ---")
-        lines.append(cell_stats.to_string(index=False))
-    
-    if tw.posthoc_results is not None:
-        lines.append(f"\n--- POST-HOC ({tw.posthoc_type}) ---")
-        lines.append(tw.posthoc_results.to_string(index=False))
-    
-    lines.append(f"\n--- APA SUMMARY ---")
-    lines.append(format_twoway_apa(result))
-    
-    return "\n".join(lines)
+def format_threeway_apa(result: FullThreeWayAnalysisResult) -> str:
+    """
+    Generate APA-formatted text for three-way ANOVA results.
+    """
+    tw = result.threeway_result
+    test_name = "three-way ANOVA" if tw.test_type == TestType.ANOVA_THREEWAY else "ART ANOVA"
+
+    parts = [f"A {test_name} was conducted to examine the effects of "
+             f"{tw.factor_a_name}, {tw.factor_b_name}, and {tw.factor_c_name} "
+             f"on {result.variable_name}."]
+
+    def _format_effect(name, f_val, p_val, df_tup, eta):
+        if np.isnan(f_val):
+            return f"The effect of {name} could not be computed."
+        sig = "significant" if p_val < tw.alpha else "not significant"
+        p_str = f"p < .001" if p_val < 0.001 else f"p = {p_val:.3f}"
+        eta_str = f", partial \u03b7\u00b2 = {eta:.2f}" if eta and not np.isnan(eta) else ""
+        df1 = int(df_tup[0]) if not np.isnan(df_tup[0]) else '?'
+        df2 = int(df_tup[1]) if not np.isnan(df_tup[1]) else '?'
+        return (f"The main effect of {name} was {sig}, "
+                f"F({df1},{df2}) = {f_val:.2f}, {p_str}{eta_str}.")
+
+    def _format_interaction(name, f_val, p_val, df_tup, eta):
+        if np.isnan(f_val):
+            return f"The {name} interaction could not be computed."
+        sig = "significant" if p_val < tw.alpha else "not significant"
+        p_str = f"p < .001" if p_val < 0.001 else f"p = {p_val:.3f}"
+        eta_str = f", partial \u03b7\u00b2 = {eta:.2f}" if eta and not np.isnan(eta) else ""
+        df1 = int(df_tup[0]) if not np.isnan(df_tup[0]) else '?'
+        df2 = int(df_tup[1]) if not np.isnan(df_tup[1]) else '?'
+        return (f"The {name} interaction was {sig}, "
+                f"F({df1},{df2}) = {f_val:.2f}, {p_str}{eta_str}.")
+
+    # Main effects
+    for name, f_val, p_val, df_tup in [
+        (tw.factor_a_name, tw.factor_a_stat, tw.factor_a_pvalue, tw.factor_a_df),
+        (tw.factor_b_name, tw.factor_b_stat, tw.factor_b_pvalue, tw.factor_b_df),
+        (tw.factor_c_name, tw.factor_c_stat, tw.factor_c_pvalue, tw.factor_c_df),
+    ]:
+        eta = tw.effect_sizes.get(name, np.nan)
+        parts.append(_format_effect(name, f_val, p_val, df_tup, eta))
+
+    # Two-way interactions
+    for label, f_val, p_val, df_tup in [
+        (f'{tw.factor_a_name} \u00d7 {tw.factor_b_name}', tw.interaction_ab_stat, tw.interaction_ab_pvalue, tw.interaction_ab_df),
+        (f'{tw.factor_a_name} \u00d7 {tw.factor_c_name}', tw.interaction_ac_stat, tw.interaction_ac_pvalue, tw.interaction_ac_df),
+        (f'{tw.factor_b_name} \u00d7 {tw.factor_c_name}', tw.interaction_bc_stat, tw.interaction_bc_pvalue, tw.interaction_bc_df),
+    ]:
+        eta_key = label.replace(' \u00d7 ', '\u00d7')
+        eta = tw.effect_sizes.get(eta_key, np.nan)
+        parts.append(_format_interaction(label, f_val, p_val, df_tup, eta))
+
+    # Three-way interaction
+    abc_label = f'{tw.factor_a_name} \u00d7 {tw.factor_b_name} \u00d7 {tw.factor_c_name}'
+    abc_eta_key = f'{tw.factor_a_name}\u00d7{tw.factor_b_name}\u00d7{tw.factor_c_name}'
+    eta_abc = tw.effect_sizes.get(abc_eta_key, np.nan)
+    parts.append(_format_interaction(abc_label, tw.interaction_abc_stat,
+                                     tw.interaction_abc_pvalue, tw.interaction_abc_df, eta_abc))
+
+    # Post-hoc summary
+    if tw.posthoc_results is not None and len(tw.posthoc_results) > 0:
+        sig_comparisons = tw.posthoc_results[tw.posthoc_results['significant']]
+        if len(sig_comparisons) > 0:
+            if tw.posthoc_type == "simple_effects":
+                parts.append(f"Simple effects analysis revealed {len(sig_comparisons)} "
+                           f"significant pairwise comparison(s) (corrected for multiple comparisons).")
+            else:
+                parts.append(f"Post-hoc pairwise comparisons on marginal means revealed "
+                           f"{len(sig_comparisons)} significant difference(s) "
+                           f"(corrected for multiple comparisons).")
+
+    return " ".join(parts)
 
 
 if __name__ == "__main__":
     # Demo with synthetic data
     np.random.seed(42)
-    
+
     # Create sample data
     demo_data = pd.DataFrame({
         'concentration': np.concatenate([

@@ -52,7 +52,7 @@ class DataStructureInfo:
     
     # Two-way ANOVA factor detection
     factors: Dict[str, str] = field(default_factory=dict)  # {display_name: column_name}
-    n_factors: int = 0  # 0 = no factors detected, 1 = one-way, 2 = two-way
+    n_factors: int = 0  # 0 = no factors, 1 = one-way, 2 = two-way, 3 = three-way
     factor_source: str = ""  # "metadata_sheet", "prefix_columns", or ""
 
 
@@ -113,11 +113,12 @@ class SphingolipidDataProcessor:
         self,
         lod_handling: str = "half_lod",  # "zero", "lod", "half_lod", "half_min", "drop"
         lod_value: float = 0.1,  # Default/fallback LOD value
+        dilution_factor: float = 1.0,  # Multiply all sphingolipid values by this after LOD replacement
         custom_sphingolipids: Optional[Dict] = None
     ):
         """
         Initialize the processor.
-        
+
         Args:
             lod_handling: How to handle below-LOD values
                 - "zero": Replace with 0
@@ -126,10 +127,12 @@ class SphingolipidDataProcessor:
                 - "half_min": Replace with half the minimum detected value
                 - "drop": Keep as NaN
             lod_value: Default/fallback LOD value when auto-detection fails
+            dilution_factor: Multiplier applied to all sphingolipid concentrations after LOD replacement
             custom_sphingolipids: Additional sphingolipid definitions to merge with panel
         """
         self.lod_handling = lod_handling
         self.lod_value = lod_value  # Fallback LOD
+        self.dilution_factor = dilution_factor
         
         # Merge custom sphingolipids if provided
         self.sphingolipid_panel = SPHINGOLIPID_PANEL.copy()
@@ -1101,7 +1104,7 @@ class SphingolipidDataProcessor:
         
         if meta_factors:
             structure.factors = meta_factors
-            structure.n_factors = min(len(meta_factors), 2)  # Cap at 2 for two-way
+            structure.n_factors = min(len(meta_factors), 3)  # Cap at 3 for three-way
             structure.factor_source = "metadata_sheet"
             # Merge the factor columns into the data
             clean_df = self._merge_metadata_factors(clean_df, structure)
@@ -1111,13 +1114,27 @@ class SphingolipidDataProcessor:
             prefix_factors = self._detect_factor_prefix_columns(clean_df, structure)
             if prefix_factors:
                 structure.factors = prefix_factors
-                structure.n_factors = min(len(prefix_factors), 2)
+                structure.n_factors = min(len(prefix_factors), 3)
                 structure.factor_source = "prefix_columns"
                 print(f"✓ Detected {len(prefix_factors)} factor(s) from column prefixes: {list(prefix_factors.keys())}")
-        
+
+        # Synthesize group column from factors when no explicit group column exists
+        if structure.factors and not structure.group_col:
+            factor_col_names = list(structure.factors.values())
+            synthetic_col = '_group_'
+            clean_df[synthetic_col] = clean_df[factor_col_names[0]].astype(str)
+            for fc in factor_col_names[1:]:
+                clean_df[synthetic_col] = clean_df[synthetic_col] + ' - ' + clean_df[fc].astype(str)
+            structure.group_col = synthetic_col
+
+        # Apply dilution factor to sphingolipid columns (after LOD replacement, before derived calcs)
+        if self.dilution_factor != 1.0:
+            sl_cols_present = [c for c in structure.sphingolipid_cols if c in clean_df.columns]
+            clean_df[sl_cols_present] = clean_df[sl_cols_present] * self.dilution_factor
+
         # Extract sample data (with metadata)
         sample_df = clean_df.copy()
-        
+
         # Get concentration data (only sphingolipid columns)
         sl_cols = [c for c in structure.sphingolipid_cols if c in sample_df.columns]
         concentrations = sample_df[sl_cols].copy()

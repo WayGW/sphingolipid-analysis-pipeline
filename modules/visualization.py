@@ -86,6 +86,26 @@ class SphingolipidVisualizer:
         self.group_palette = get_group_palette(color_palette, 10)
         sns.set_style(style)
         sns.set_palette(color_palette)
+
+        # Fixed species->color map derived from the full canonical panel sorted
+        # alphabetically, so each species gets the same color in every experiment
+        # regardless of which subset is detected or how percentages rank them.
+        # Hues step by the golden ratio so alphabetically-adjacent species land
+        # far apart on the color wheel (prevents two neighbours in a sorted pie
+        # from looking similar). Saturation/value are dimmed below the default
+        # hsv colormap so slices don't look neon.
+        import colorsys
+        from config.sphingolipid_species import get_all_species
+        canonical_species = sorted(get_all_species())
+        golden_ratio_conjugate = 0.61803398875
+        saturation = 0.60
+        value = 0.85
+        self.species_color_map: Dict[str, tuple] = {}
+        for i, sp in enumerate(canonical_species):
+            hue = (i * golden_ratio_conjugate) % 1.0
+            r, g, b = colorsys.hsv_to_rgb(hue, saturation, value)
+            self.species_color_map[sp] = (r, g, b, 1.0)
+        self.species_color_map['Other'] = '#F5F0E8'
     
     def plot_group_comparison(
         self,
@@ -872,14 +892,15 @@ class SphingolipidVisualizer:
         if figsize is None:
             figsize = (5 * n_groups, 5)
         
-        fig, axes = plt.subplots(1, n_groups, figsize=figsize)
+        fig, axes = plt.subplots(1, n_groups, figsize=figsize, dpi=150)
         if n_groups == 1:
             axes = [axes]
         
-        # Use a nice color palette
+        # Use the canonical species->color map so colors are consistent across
+        # experiments (not reassigned by per-experiment ranking).
         all_species = [col.replace('_pct', '') for col in pct_cols]
-        colors = plt.cm.tab20(np.linspace(0, 1, min(len(all_species) + 1, 20)))
-        color_map = dict(zip(all_species + ['Other'], colors))
+        color_map = {sp: self.species_color_map.get(sp, '#999999') for sp in all_species}
+        color_map['Other'] = self.species_color_map.get('Other', '#F5F0E8')
         
         for idx, (group, ax) in enumerate(zip(groups, axes)):
             group_data = data[data[group_col] == group][pct_cols].mean()
@@ -901,22 +922,33 @@ class SphingolipidVisualizer:
             
             # Get colors for this pie
             pie_colors = [color_map.get(sp, '#999999') for sp in plot_data.index]
-            
-            # Create pie chart
-            wedges, texts, autotexts = ax.pie(
+
+            # Build slice labels from stored values (not matplotlib's renormalized autopct),
+            # so labels match the mean-of-per-sample-% shown in the bar/stat plots even when
+            # rounded per-row percentages don't sum to exactly 100.
+            slice_labels = [
+                f'{val:.1f}%' if val >= 3 else ''
+                for val in plot_data.values
+            ]
+
+            wedges, texts = ax.pie(
                 plot_data.values,
-                labels=None,  # We'll add a legend instead
-                autopct=lambda pct: f'{pct:.1f}%' if pct >= 3 else '',
+                labels=None,  # legend added below
                 colors=pie_colors,
-                pctdistance=0.75,
                 startangle=90,
                 wedgeprops={'edgecolor': 'white', 'linewidth': 1}
             )
-            
-            # Style the percentage labels
-            for autotext in autotexts:
-                autotext.set_fontsize(8)
-                autotext.set_fontweight('bold')
+
+            total = plot_data.values.sum()
+            pctdistance = 0.75
+            for wedge, label in zip(wedges, slice_labels):
+                if not label:
+                    continue
+                theta = np.deg2rad((wedge.theta2 + wedge.theta1) / 2)
+                x = pctdistance * np.cos(theta)
+                y = pctdistance * np.sin(theta)
+                ax.text(x, y, label, ha='center', va='center',
+                        fontsize=8, fontweight='bold')
             
             ax.set_title(f'{group}', fontsize=12, fontweight='bold')
         
@@ -949,7 +981,159 @@ class SphingolipidVisualizer:
         
         plt.tight_layout()
         return fig
-    
+
+    def plot_category_composition_pie_charts(
+        self,
+        data: pd.DataFrame,
+        group_col: str,
+        sphingolipid_cols: List[str],
+        title: Optional[str] = None,
+        figsize: Optional[Tuple[float, float]] = None,
+        other_threshold: float = 2.0
+    ) -> plt.Figure:
+        """
+        Create pie charts showing within-category sphingolipid composition.
+
+        One column per category (ceramides, dihydroceramides, sphingomyelins,
+        hexosylceramides, ceramide-1-phosphates, sphingoid bases, sphingoid base
+        phosphates); one row per group. Slices show individual species percentages
+        within that category.
+        """
+        from config.sphingolipid_species import (
+            get_ceramides, get_dihydroceramides, get_sphingomyelins,
+            get_hexosylceramides, get_ceramide_1_phosphates,
+            get_sphingoid_bases, get_sphingoid_base_phosphates,
+        )
+
+        available = set(sphingolipid_cols) & set(data.columns)
+
+        categories = {
+            'Ceramides': [s for s in get_ceramides() if s in available],
+            'Dihydroceramides': [s for s in get_dihydroceramides() if s in available],
+            'Sphingomyelins': [s for s in get_sphingomyelins() if s in available],
+            'Hexosylceramides': [s for s in get_hexosylceramides() if s in available],
+            'Ceramide-1-Phosphates': [s for s in get_ceramide_1_phosphates() if s in available],
+            'Sphingoid Bases': [s for s in get_sphingoid_bases() if s in available],
+            'Sphingoid Base Phosphates': [s for s in get_sphingoid_base_phosphates() if s in available],
+        }
+        categories = {k: v for k, v in categories.items() if v}
+
+        data = data.copy()
+        data = data[data[group_col].notna()]
+        data = data[data[group_col].astype(str).str.lower() != 'nan']
+
+        groups = data[group_col].unique().tolist()
+        n_groups = len(groups)
+        n_categories = len(categories)
+
+        if n_categories == 0:
+            fig, ax = plt.subplots(1, 1, figsize=(6, 4))
+            ax.text(0.5, 0.5, 'No category data available', ha='center', va='center')
+            return fig
+
+        if figsize is None:
+            figsize = (5 * n_categories, 5.5 * n_groups)
+
+        fig, axes = plt.subplots(n_groups, n_categories, figsize=figsize,
+                                 squeeze=False, dpi=150)
+        fig.subplots_adjust(hspace=0.4, wspace=0.3)
+
+        # Pull colors from the instance-wide canonical species map so the same
+        # species gets the same color in every experiment.
+        sp_color_map = dict(self.species_color_map)
+
+        category_names = list(categories.keys())
+
+        for row_idx, group in enumerate(groups):
+            group_data = data[data[group_col] == group]
+
+            for col_idx, cat_name in enumerate(category_names):
+                ax = axes[row_idx, col_idx]
+                species_list = categories[cat_name]
+
+                means = group_data[species_list].mean()
+                cat_total = means.sum()
+
+                if cat_total <= 0 or pd.isna(cat_total):
+                    ax.text(0.5, 0.5, 'N/A', ha='center', va='center', fontsize=10)
+                    ax.set_title(f'{cat_name}', fontsize=10, fontweight='bold')
+                    if col_idx == 0:
+                        ax.set_ylabel(f'{group}', fontsize=11, fontweight='bold')
+                    continue
+
+                pcts = (means / cat_total * 100).sort_values(ascending=False)
+
+                main_slices = pcts[pcts >= other_threshold]
+                other_value = pcts[pcts < other_threshold].sum()
+
+                if other_value > 0.1:
+                    plot_data = pd.concat([main_slices, pd.Series({'Other': other_value})])
+                else:
+                    plot_data = main_slices
+
+                pie_colors = [sp_color_map.get(sp, '#F5F0E8') for sp in plot_data.index]
+
+                # Label each wedge with its stored percentage (no autopct renormalization)
+                slice_labels = [
+                    f'{val:.1f}%' if val >= 3 else ''
+                    for val in plot_data.values
+                ]
+
+                wedges, _texts = ax.pie(
+                    plot_data.values,
+                    labels=None,
+                    colors=pie_colors,
+                    startangle=90,
+                    wedgeprops={'edgecolor': 'white', 'linewidth': 1}
+                )
+
+                pctdistance = 0.75
+                for wedge, label in zip(wedges, slice_labels):
+                    if not label:
+                        continue
+                    theta = np.deg2rad((wedge.theta2 + wedge.theta1) / 2)
+                    x = pctdistance * np.cos(theta)
+                    y = pctdistance * np.sin(theta)
+                    ax.text(x, y, label, ha='center', va='center',
+                            fontsize=12, fontweight='bold')
+
+                if row_idx == 0:
+                    ax.set_title(f'{cat_name}', fontsize=14, fontweight='bold', pad=10)
+                if col_idx == 0:
+                    ax.set_ylabel(f'{group}', fontsize=14, fontweight='bold', labelpad=15)
+
+        # Per-category legends along the bottom row
+        for col_idx, cat_name in enumerate(category_names):
+            species_list = categories[cat_name]
+            displayed = set()
+            any_nonzero = False
+            for group in groups:
+                gd = data[data[group_col] == group]
+                means = gd[species_list].mean()
+                cat_total = means.sum()
+                if cat_total > 0:
+                    any_nonzero = True
+                    pcts = means / cat_total * 100
+                    displayed.update(pcts[pcts >= other_threshold].index.tolist())
+
+            sorted_sps = sorted(displayed)
+            legend_items = [mpatches.Patch(color=sp_color_map.get(sp, '#F5F0E8'), label=sp)
+                            for sp in sorted_sps]
+            if any_nonzero:
+                legend_items.append(mpatches.Patch(color='#F5F0E8', label='Other'))
+
+            axes[-1, col_idx].legend(
+                handles=legend_items, loc='upper center',
+                bbox_to_anchor=(0.5, -0.08), fontsize=10, ncol=2,
+                frameon=True, fancybox=True
+            )
+
+        if title:
+            fig.suptitle(title, fontsize=16, fontweight='bold', y=1.02)
+
+        plt.tight_layout()
+        return fig
+
     def plot_composition_horizontal_bars(
         self,
         data: pd.DataFrame,
@@ -1585,6 +1769,513 @@ class SphingolipidVisualizer:
         plt.tight_layout()
         return fig
     
+    # ================================================================
+    # THREE-WAY ANOVA VISUALIZATION 
+    # ================================================================
+
+    def plot_threeway_faceted(
+        self,
+        data: pd.DataFrame,
+        value_col: str,
+        factor_a_col: str,
+        factor_b_col: str,
+        factor_c_col: str,
+        threeway_result=None,
+        factor_a_name: Optional[str] = None,
+        factor_b_name: Optional[str] = None,
+        factor_c_name: Optional[str] = None,
+        ylabel: str = "Concentration",
+        show_points: bool = True,
+        plot_type: str = "bar",
+        title: Optional[str] = None,
+    ) -> plt.Figure:
+        """
+        Create faceted grouped plot for three-way ANOVA.
+
+        One subplot per level of Factor C, with Factor A on x-axis
+        and Factor B as hue/color.
+        """
+        import math
+
+        fa_name = factor_a_name or factor_a_col
+        fb_name = factor_b_name or factor_b_col
+        fc_name = factor_c_name or factor_c_col
+
+        # Clean data
+        df = data[[value_col, factor_a_col, factor_b_col, factor_c_col]].dropna().copy()
+        df[value_col] = pd.to_numeric(df[value_col], errors='coerce')
+        df = df.dropna()
+
+        c_levels = sorted(df[factor_c_col].unique())
+        n_c = len(c_levels)
+
+        has_anova = threeway_result is not None
+        fig_height = 6.5 if has_anova else 5
+        fig, axes = plt.subplots(1, n_c, figsize=(max(5, 4 * n_c), fig_height), sharey=True)
+        if n_c == 1:
+            axes = [axes]
+
+        a_levels = sorted(df[factor_a_col].unique())
+        b_levels = sorted(df[factor_b_col].unique())
+        n_a = len(a_levels)
+        n_b = len(b_levels)
+
+        bar_width = 0.8 / n_b
+        x_base = np.arange(n_a)
+        palette = self.group_palette[:n_b]
+
+        for c_idx, c_level in enumerate(c_levels):
+            ax = axes[c_idx]
+            subset = df[df[factor_c_col] == c_level]
+
+            if plot_type == "box":
+                palette_dict = dict(zip(b_levels, palette))
+                sns.boxplot(data=subset, x=factor_a_col, y=value_col, hue=factor_b_col,
+                           ax=ax, palette=palette_dict, order=a_levels, hue_order=b_levels)
+                if show_points:
+                    sns.stripplot(data=subset, x=factor_a_col, y=value_col, hue=factor_b_col,
+                                 ax=ax, dodge=True, palette='dark:black', alpha=0.6, size=3,
+                                 order=a_levels, hue_order=b_levels, legend=False,
+                                 jitter=0.15, zorder=10, edgecolor='white', linewidth=0.3)
+            else:  # "bar"
+                for j, b_level in enumerate(b_levels):
+                    x_pos = x_base + (j - (n_b - 1) / 2) * bar_width
+                    means = []
+                    sems = []
+                    for a_level in a_levels:
+                        cell = subset[(subset[factor_a_col] == a_level) & (subset[factor_b_col] == b_level)][value_col]
+                        means.append(cell.mean() if len(cell) > 0 else 0)
+                        sems.append(cell.sem() if len(cell) > 1 else 0)
+
+                    ax.bar(x_pos, means, width=bar_width * 0.9, yerr=sems,
+                           capsize=3, color=palette[j], edgecolor='black', linewidth=0.5,
+                           label=str(b_level) if c_idx == 0 else None, zorder=2)
+
+                    if show_points:
+                        for i, a_level in enumerate(a_levels):
+                            cell_vals = subset[(subset[factor_a_col] == a_level) & (subset[factor_b_col] == b_level)][value_col]
+                            if len(cell_vals) > 0:
+                                jitter = np.random.normal(0, bar_width * 0.08, len(cell_vals))
+                                ax.scatter(x_pos[i] + jitter, cell_vals, color='black', alpha=0.6,
+                                           s=15, zorder=10, edgecolors='white', linewidths=0.3)
+
+                ax.set_xticks(x_base)
+                ax.set_xticklabels(a_levels)
+
+            ax.set_xlabel(fa_name)
+            if c_idx == 0:
+                ax.set_ylabel(ylabel)
+            ax.set_title(f'{fc_name} = {c_level}', fontsize=10)
+
+            # Only show legend on first panel
+            if c_idx == 0:
+                ax.legend(title=fb_name, loc='upper right', framealpha=0.9, fontsize=7)
+            else:
+                legend = ax.get_legend()
+                if legend:
+                    legend.remove()
+
+        if title:
+            fig.suptitle(title, fontsize=12, y=1.02)
+
+        plt.tight_layout()
+
+        # Add ANOVA summary text AFTER tight_layout to prevent clipping
+        if threeway_result is not None:
+            tw = threeway_result
+            if hasattr(tw, 'threeway_result'):
+                tw = tw.threeway_result
+            def _stars(p):
+                if p is None or (isinstance(p, float) and math.isnan(p)):
+                    return '?'
+                if p < 0.001: return '***'
+                if p < 0.01: return '**'
+                if p < 0.05: return '*'
+                return 'ns'
+            def _fmt_p(p):
+                if p is None or (isinstance(p, float) and math.isnan(p)):
+                    return 'N/A'
+                if p < 0.001: return '<.001'
+                return f"{p:.3f}"
+
+            anova_text = (
+                f"Main effects:    {tw.factor_a_name}: p={_fmt_p(tw.factor_a_pvalue)} {_stars(tw.factor_a_pvalue)}  |  "
+                f"{tw.factor_b_name}: p={_fmt_p(tw.factor_b_pvalue)} {_stars(tw.factor_b_pvalue)}  |  "
+                f"{tw.factor_c_name}: p={_fmt_p(tw.factor_c_pvalue)} {_stars(tw.factor_c_pvalue)}\n"
+                f"2-way:  {tw.factor_a_name}\u00d7{tw.factor_b_name}: p={_fmt_p(tw.interaction_ab_pvalue)} {_stars(tw.interaction_ab_pvalue)}  |  "
+                f"{tw.factor_a_name}\u00d7{tw.factor_c_name}: p={_fmt_p(tw.interaction_ac_pvalue)} {_stars(tw.interaction_ac_pvalue)}  |  "
+                f"{tw.factor_b_name}\u00d7{tw.factor_c_name}: p={_fmt_p(tw.interaction_bc_pvalue)} {_stars(tw.interaction_bc_pvalue)}\n"
+                f"3-way:  {tw.factor_a_name}\u00d7{tw.factor_b_name}\u00d7{tw.factor_c_name}: p={_fmt_p(tw.interaction_abc_pvalue)} {_stars(tw.interaction_abc_pvalue)}"
+            )
+            fig.subplots_adjust(bottom=0.18)
+            fig.text(0.02, 0.01, anova_text, fontsize=7, fontfamily='monospace',
+                     bbox=dict(boxstyle='round,pad=0.4', facecolor='wheat', alpha=0.9,
+                               edgecolor='#c0a060'),
+                     verticalalignment='bottom')
+
+        return fig
+
+    def plot_threeway_interaction(
+        self,
+        data: pd.DataFrame,
+        value_col: str,
+        factor_a_col: str,
+        factor_b_col: str,
+        factor_c_col: str,
+        threeway_result=None,
+        ax: Optional[plt.Axes] = None,
+        factor_a_name: Optional[str] = None,
+        factor_b_name: Optional[str] = None,
+        factor_c_name: Optional[str] = None,
+        ylabel: str = "Concentration",
+    ) -> plt.Figure:
+        """
+        Create faceted interaction plots for three-way ANOVA.
+
+        One subplot per level of Factor C, with Factor A on x-axis
+        and separate lines for Factor B levels.
+        """
+        fa_name = factor_a_name or factor_a_col
+        fb_name = factor_b_name or factor_b_col
+        fc_name = factor_c_name or factor_c_col
+
+        df = data[[value_col, factor_a_col, factor_b_col, factor_c_col]].dropna().copy()
+        df[value_col] = pd.to_numeric(df[value_col], errors='coerce')
+        df = df.dropna()
+
+        c_levels = sorted(df[factor_c_col].unique())
+        a_levels = sorted(df[factor_a_col].unique())
+        b_levels = sorted(df[factor_b_col].unique())
+        n_c = len(c_levels)
+
+        fig, axes = plt.subplots(1, n_c, figsize=(max(5, 4 * n_c), 4), sharey=True)
+        if n_c == 1:
+            axes = [axes]
+
+        palette = self.group_palette[:len(b_levels)]
+        x_pos = np.arange(len(a_levels))
+
+        for c_idx, c_level in enumerate(c_levels):
+            ax = axes[c_idx]
+            subset = df[df[factor_c_col] == c_level]
+
+            for b_idx, b_level in enumerate(b_levels):
+                means = []
+                sems = []
+                for a_level in a_levels:
+                    cell = subset[(subset[factor_a_col] == a_level) & (subset[factor_b_col] == b_level)][value_col]
+                    means.append(cell.mean() if len(cell) > 0 else np.nan)
+                    sems.append(cell.sem() if len(cell) > 1 else 0)
+
+                ax.errorbar(x_pos, means, yerr=sems, marker='o', capsize=4,
+                           color=palette[b_idx], linewidth=1.5, markersize=6,
+                           label=str(b_level) if c_idx == 0 else None)
+
+            ax.set_xticks(x_pos)
+            ax.set_xticklabels(a_levels)
+            ax.set_xlabel(fa_name)
+            if c_idx == 0:
+                ax.set_ylabel(ylabel)
+            ax.set_title(f'{fc_name} = {c_level}', fontsize=10)
+
+            if c_idx == 0:
+                ax.legend(title=fb_name, fontsize=7, framealpha=0.9)
+
+        if threeway_result is not None:
+            tw = threeway_result
+            if hasattr(tw, 'threeway_result'):
+                tw = tw.threeway_result
+            fig.suptitle(f'{value_col} — {fa_name} \u00d7 {fb_name} \u00d7 {fc_name}', fontsize=11)
+
+        plt.tight_layout()
+        return fig
+
+    def plot_threeway_multi_panel(
+        self,
+        data: pd.DataFrame,
+        value_cols: List[str],
+        factor_a_col: str,
+        factor_b_col: str,
+        factor_c_col: str,
+        threeway_results: Dict = None,
+        ncols: int = 3,
+        figsize: Optional[Tuple[float, float]] = None,
+        factor_a_name: Optional[str] = None,
+        factor_b_name: Optional[str] = None,
+        factor_c_name: Optional[str] = None,
+        ylabel: str = "Concentration",
+        show_points: bool = True,
+        plot_type: str = "bar",
+        log_scale: bool = False,
+    ) -> plt.Figure:
+        """
+        Multi-panel faceted bar plots for three-way ANOVA.
+
+        Each analyte gets a row of subplots (one per Factor C level)
+        plus an ANOVA significance annotation column on the right.
+        """
+        import math
+
+        fa_name = factor_a_name or factor_a_col
+        fb_name = factor_b_name or factor_b_col
+        fc_name = factor_c_name or factor_c_col
+
+        def _stars(p):
+            if p is None or (isinstance(p, float) and math.isnan(p)):
+                return '?'
+            if p < 0.001: return '***'
+            if p < 0.01: return '**'
+            if p < 0.05: return '*'
+            return 'ns'
+
+        def _fmt_p(p):
+            if p is None or (isinstance(p, float) and math.isnan(p)):
+                return 'N/A'
+            if p < 0.001: return '<.001'
+            return f'{p:.3f}'
+
+        df = data.copy()
+        c_levels = sorted(df[factor_c_col].astype(str).str.strip().unique())
+        n_c = len(c_levels)
+        n_analytes = len(value_cols)
+
+        has_results = threeway_results is not None and len(threeway_results) > 0
+        total_cols = n_c + (1 if has_results else 0)
+
+        if figsize is None:
+            plot_width = max(5, 4 * n_c) + (3.2 if has_results else 0)
+            figsize = (plot_width, max(4, 3.5 * n_analytes))
+
+        if has_results:
+            fig, axes = plt.subplots(n_analytes, total_cols, figsize=figsize,
+                                     gridspec_kw={'width_ratios': [1]*n_c + [0.65]},
+                                     squeeze=False)
+        else:
+            fig, axes = plt.subplots(n_analytes, n_c, figsize=figsize, squeeze=False)
+
+        # Share y-axis within each row (only among plot columns)
+        for row_idx in range(n_analytes):
+            for c_idx in range(1, n_c):
+                axes[row_idx, c_idx].sharey(axes[row_idx, 0])
+
+        a_levels = sorted(df[factor_a_col].astype(str).str.strip().unique())
+        b_levels = sorted(df[factor_b_col].astype(str).str.strip().unique())
+        n_a = len(a_levels)
+        n_b = len(b_levels)
+        bar_width = 0.8 / n_b
+        x_base = np.arange(n_a)
+        palette = self.group_palette[:n_b]
+
+        for row_idx, col in enumerate(value_cols):
+            if col not in df.columns:
+                for c_idx in range(total_cols):
+                    axes[row_idx, c_idx].set_visible(False)
+                continue
+
+            # Apply log10 transform if requested
+            plot_col = col
+            if log_scale:
+                plot_col = f'{col}_log10'
+                numeric_vals = pd.to_numeric(df[col], errors='coerce')
+                min_positive = numeric_vals[numeric_vals > 0].min()
+                floor_val = min_positive / 10 if pd.notna(min_positive) else 0.001
+                df[plot_col] = np.log10(numeric_vals.clip(lower=floor_val))
+
+            tw_result = None
+            if threeway_results and col in threeway_results:
+                result_obj = threeway_results[col]
+                if hasattr(result_obj, 'threeway_result'):
+                    tw_result = result_obj.threeway_result
+                else:
+                    tw_result = result_obj
+
+            for c_idx, c_level in enumerate(c_levels):
+                ax = axes[row_idx, c_idx]
+                subset = df[df[factor_c_col].astype(str).str.strip() == c_level]
+
+                for j, b_level in enumerate(b_levels):
+                    x_pos = x_base + (j - (n_b - 1) / 2) * bar_width
+                    means = []
+                    sems = []
+                    for a_level in a_levels:
+                        cell = subset[(subset[factor_a_col].astype(str).str.strip() == a_level) &
+                                      (subset[factor_b_col].astype(str).str.strip() == b_level)][plot_col]
+                        cell = pd.to_numeric(cell, errors='coerce').dropna()
+                        means.append(cell.mean() if len(cell) > 0 else 0)
+                        sems.append(cell.sem() if len(cell) > 1 else 0)
+
+                    ax.bar(x_pos, means, width=bar_width * 0.9, yerr=sems,
+                           capsize=2, color=palette[j], edgecolor='black', linewidth=0.5,
+                           label=str(b_level) if (row_idx == 0 and c_idx == 0) else None, zorder=2)
+
+                    if show_points:
+                        for i, a_level in enumerate(a_levels):
+                            cell_vals = subset[(subset[factor_a_col].astype(str).str.strip() == a_level) &
+                                               (subset[factor_b_col].astype(str).str.strip() == b_level)][plot_col]
+                            cell_vals = pd.to_numeric(cell_vals, errors='coerce').dropna()
+                            if len(cell_vals) > 0:
+                                jitter_vals = np.random.normal(0, bar_width * 0.06, len(cell_vals))
+                                ax.scatter(x_pos[i] + jitter_vals, cell_vals, color='black', alpha=0.5,
+                                           s=12, zorder=10, edgecolors='white', linewidths=0.2)
+
+                ax.set_xticks(x_base)
+                ax.set_xticklabels(a_levels, fontsize=7)
+
+                if row_idx == 0:
+                    ax.set_title(f'{fc_name} = {c_level}', fontsize=9)
+                if c_idx == 0:
+                    ax.set_ylabel(f'log10({col})' if log_scale else col, fontsize=8)
+                if row_idx == n_analytes - 1:
+                    ax.set_xlabel(fa_name, fontsize=8)
+
+            # ANOVA annotation panel (rightmost column)
+            if has_results:
+                ann_ax = axes[row_idx, n_c]
+                ann_ax.axis('off')
+
+                if tw_result is not None:
+                    fa_short = fa_name[:12] if len(fa_name) > 12 else fa_name
+                    fb_short = fb_name[:12] if len(fb_name) > 12 else fb_name
+                    fc_short = fc_name[:12] if len(fc_name) > 12 else fc_name
+
+                    effects = [
+                        (fa_short, tw_result.factor_a_pvalue),
+                        (fb_short, tw_result.factor_b_pvalue),
+                        (fc_short, tw_result.factor_c_pvalue),
+                        (f'{fa_short}\u00d7{fb_short}', tw_result.interaction_ab_pvalue),
+                        (f'{fa_short}\u00d7{fc_short}', tw_result.interaction_ac_pvalue),
+                        (f'{fb_short}\u00d7{fc_short}', tw_result.interaction_bc_pvalue),
+                        (f'{fa_short}\u00d7{fb_short}\u00d7{fc_short}', tw_result.interaction_abc_pvalue),
+                    ]
+
+                    lines = []
+                    for name, p_val in effects:
+                        sig = _stars(p_val)
+                        p_str = _fmt_p(p_val)
+                        lines.append(f'{name}: {p_str} {sig}')
+
+                    ann_text = '\n'.join(lines)
+                    any_sig = any(
+                        not (p is None or (isinstance(p, float) and math.isnan(p))) and p < 0.05
+                        for _, p in effects
+                    )
+                    bg_color = '#fff3cd' if any_sig else '#f8f9fa'
+
+                    ann_ax.text(0.05, 0.5, ann_text, transform=ann_ax.transAxes,
+                                fontsize=6, fontfamily='monospace', va='center', ha='left',
+                                bbox=dict(boxstyle='round,pad=0.4', facecolor=bg_color, alpha=0.9,
+                                          edgecolor='#dee2e6'))
+
+        plt.tight_layout()
+
+        # Single legend at top-right, placed after tight_layout so it isn't displaced
+        handles, labels = axes[0, 0].get_legend_handles_labels()
+        if handles:
+            fig.legend(handles, labels, title=fb_name, loc='upper right',
+                      fontsize=7, title_fontsize=8, framealpha=0.9,
+                      bbox_to_anchor=(0.98, 0.99))
+
+        return fig
+
+    def plot_threeway_interaction_multi_panel(
+        self,
+        data: pd.DataFrame,
+        value_cols: List[str],
+        factor_a_col: str,
+        factor_b_col: str,
+        factor_c_col: str,
+        threeway_results: Dict = None,
+        ncols: int = 3,
+        figsize: Optional[Tuple[float, float]] = None,
+        factor_a_name: Optional[str] = None,
+        factor_b_name: Optional[str] = None,
+        factor_c_name: Optional[str] = None,
+        ylabel: str = "Concentration",
+    ) -> plt.Figure:
+        """Multi-panel interaction (line) plots for three-way ANOVA."""
+        n_plots = len(value_cols)
+        nrows = int(np.ceil(n_plots / ncols))
+
+        if figsize is None:
+            figsize = (ncols * 5.5, nrows * 4.5)
+
+        fig = plt.figure(figsize=figsize)
+        gs_outer = fig.add_gridspec(nrows, ncols, hspace=0.55, wspace=0.35)
+
+        fa_name = factor_a_name or factor_a_col
+        fb_name = factor_b_name or factor_b_col
+        fc_name = factor_c_name or factor_c_col
+
+        df = data.copy()
+        c_levels = sorted(df[factor_c_col].astype(str).str.strip().unique())
+        a_levels = sorted(df[factor_a_col].astype(str).str.strip().unique())
+        b_levels = sorted(df[factor_b_col].astype(str).str.strip().unique())
+        n_c = len(c_levels)
+
+        palette = self.group_palette[:len(b_levels)]
+        x_pos = np.arange(len(a_levels))
+
+        for plot_idx, col in enumerate(value_cols):
+            row = plot_idx // ncols
+            col_idx = plot_idx % ncols
+
+            if col not in df.columns:
+                continue
+
+            tw_result = None
+            if threeway_results and col in threeway_results:
+                result_obj = threeway_results[col]
+                if hasattr(result_obj, 'threeway_result'):
+                    tw_result = result_obj.threeway_result
+                else:
+                    tw_result = result_obj
+
+            gs_inner = gs_outer[row, col_idx].subgridspec(1, n_c, wspace=0.2)
+
+            for c_idx, c_level in enumerate(c_levels):
+                ax = fig.add_subplot(gs_inner[0, c_idx])
+                subset = df[df[factor_c_col].astype(str).str.strip() == c_level]
+
+                for b_idx, b_level in enumerate(b_levels):
+                    means = []
+                    sems = []
+                    for a_level in a_levels:
+                        cell = subset[(subset[factor_a_col].astype(str).str.strip() == a_level) &
+                                      (subset[factor_b_col].astype(str).str.strip() == b_level)][col]
+                        cell = pd.to_numeric(cell, errors='coerce').dropna()
+                        means.append(cell.mean() if len(cell) > 0 else np.nan)
+                        sems.append(cell.sem() if len(cell) > 1 else 0)
+
+                    ax.errorbar(x_pos, means, yerr=sems, marker='o', capsize=3,
+                               color=palette[b_idx], linewidth=1.5, markersize=5,
+                               label=str(b_level) if (plot_idx == 0 and c_idx == 0) else None)
+
+                ax.set_xticks(x_pos)
+                ax.set_xticklabels(a_levels, fontsize=7, rotation=0)
+                ax.tick_params(labelsize=7)
+
+                if c_idx == 0:
+                    ax.set_ylabel(col, fontsize=8)
+                ax.set_xlabel(fa_name, fontsize=7)
+
+                if c_idx > 0:
+                    ax.set_yticklabels([])
+
+                ax.set_title(f'{fc_name}={c_level}', fontsize=7, pad=3)
+
+        fig.subplots_adjust(hspace=0.55, wspace=0.35)
+
+        # Add shared legend after tight_layout so it stays close to the plots
+        handles = []
+        labels = []
+        for b_idx, b_level in enumerate(b_levels):
+            handles.append(plt.Line2D([0], [0], color=palette[b_idx], marker='o', linewidth=1.5))
+            labels.append(str(b_level))
+        fig.legend(handles, labels, title=fb_name, loc='upper right',
+                  fontsize=8, title_fontsize=9, framealpha=0.9,
+                  bbox_to_anchor=(0.98, 0.9))
+
+        return fig
     def save_figure(
         self,
         fig: plt.Figure,
@@ -1605,7 +2296,8 @@ def create_summary_figure(
     sphingolipid_cols: List[str],
     group_col: str,
     totals: pd.DataFrame,
-    output_path: Optional[Path] = None
+    output_path: Optional[Path] = None,
+    units: str = 'ng/mL'
 ) -> plt.Figure:
     """Create a comprehensive summary figure with multiple panels."""
     fig = plt.figure(figsize=(16, 12))
@@ -1618,7 +2310,7 @@ def create_summary_figure(
     if 'total_all' in combined.columns:
         sns.boxplot(data=combined, x=group_col, y='total_all', ax=ax1)
         ax1.set_title('Total Sphingolipids')
-        ax1.set_ylabel('Concentration (ng/mL)')
+        ax1.set_ylabel(f'Concentration ({units})')
     
     # 2. Ceramides vs Sphingomyelins
     ax2 = fig.add_subplot(gs[0, 1])

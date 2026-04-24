@@ -880,22 +880,22 @@ def render_concentrations_tab(processed, settings):
                        and any(getattr(results.threeway_individual_sl[s].threeway_result, attr) < settings['alpha']
                                for attr in ['factor_a_pvalue','factor_b_pvalue','factor_c_pvalue',
                                             'interaction_ab_pvalue','interaction_ac_pvalue',
-                                            'interaction_bc_pvalue','interaction_abc_pvalue'])][:10]
+                                            'interaction_bc_pvalue','interaction_abc_pvalue'])]
         elif is_twoway:
             selected = [s for s in available_sls if s in results.twoway_individual_sl
                        and (results.twoway_individual_sl[s].twoway_result.factor_a_pvalue < settings['alpha']
                             or results.twoway_individual_sl[s].twoway_result.factor_b_pvalue < settings['alpha']
-                            or results.twoway_individual_sl[s].twoway_result.interaction_pvalue < settings['alpha'])][:10]
+                            or results.twoway_individual_sl[s].twoway_result.interaction_pvalue < settings['alpha'])]
         else:
             selected = [s for s in available_sls if s in results.individual_sl_results 
-                       and results.individual_sl_results[s].main_test.significant][:10]
+                       and results.individual_sl_results[s].main_test.significant]
         if not selected:
             st.info("No significant individual sphingolipids found.")
             selected = get_top_analytes(processed, 5)
     elif quick == "Ceramides":
-        selected = [s for s in get_ceramides() if s in available_sls][:10]
+        selected = [s for s in get_ceramides() if s in available_sls]
     elif quick == "Sphingomyelins":
-        selected = [s for s in get_sphingomyelins() if s in available_sls][:10]
+        selected = [s for s in get_sphingomyelins() if s in available_sls]
     else:
         with col2:
             selected = st.multiselect("Select sphingolipids", available_sls, available_sls[:5])

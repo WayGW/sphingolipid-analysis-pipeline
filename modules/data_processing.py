@@ -932,10 +932,10 @@ class SphingolipidDataProcessor:
             series = series.fillna(0)
         elif self.lod_handling == "lod":
             # Use the analyte-specific LOD value
-            series = series.fillna(analyte_lod)
+            series = series.fillna(analyte_lod * self.dilution_factor)
         elif self.lod_handling == "half_lod":
             # Use half the analyte-specific LOD value
-            series = series.fillna(analyte_lod / 2)
+            series = series.fillna((analyte_lod / 2)*self.dilution_factor)
         elif self.lod_handling == "half_min":
             min_val = series[series > 0].min()
             if pd.notna(min_val):
@@ -1126,11 +1126,6 @@ class SphingolipidDataProcessor:
             for fc in factor_col_names[1:]:
                 clean_df[synthetic_col] = clean_df[synthetic_col] + ' - ' + clean_df[fc].astype(str)
             structure.group_col = synthetic_col
-
-        # Apply dilution factor to sphingolipid columns (after LOD replacement, before derived calcs)
-        if self.dilution_factor != 1.0:
-            sl_cols_present = [c for c in structure.sphingolipid_cols if c in clean_df.columns]
-            clean_df[sl_cols_present] = clean_df[sl_cols_present] * self.dilution_factor
 
         # Extract sample data (with metadata)
         sample_df = clean_df.copy()
